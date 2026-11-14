@@ -1,0 +1,20 @@
+# Build outputs
+build/
+.gradle/
+.kotlin/
+*.iml
+.idea/
+captures/
+.cxx/
+preview/shots/
+
+# Local config & signing secrets (never commit)
+local.properties
+keys/
+*.jks
+*.keystore
+
+# OS / logs
+.DS_Store
+Thumbs.db
+*.log
