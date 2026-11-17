@@ -1,5 +1,7 @@
 package com.milolab.btctv.data
 
+import com.milolab.btctv.data.indicators.IndicatorResult
+
 /** 一根K线，t = 开盘时间(毫秒) */
 data class Candle(
     val t: Long,
@@ -51,17 +53,240 @@ enum class TF(val label: String, val binance: String, val okx: String, val bybit
     fun step(delta: Int): TF = entries[Math.floorMod(ordinal + delta, entries.size)]
 }
 
-enum class Coin(val base: String, val accent: Long, val glyph: String) {
-    BTC("BTC", 0xFFF7931A, "\u20BF"),
-    ETH("ETH", 0xFF8C9EFF, "\u039E"),
-    SOL("SOL", 0xFF9D7BFF, "S"),
-    BNB("BNB", 0xFFF3BA2F, "B"),
-    DOGE("DOGE", 0xFFC2A633, "D");
+enum class MarketType { CRYPTO, STOCK }
 
-    val pair: String get() = base + "USDT"
-    val okxPair: String get() = base + "-USDT"
+/** 同一只股票在 OKX 上的两种形态，各自是独立条目 */
+enum class StockKind(val label: String) {
+    PERP("永续"),
+    TOKENIZED("代币现货")
+}
 
-    fun step(delta: Int): Coin = entries[Math.floorMod(ordinal + delta, entries.size)]
+/** 与加密币重名的正股（如 SOL）使用的前缀；展示仍用正股代码 */
+const val STOCK_ID_PREFIX = "stock:"
+
+/** 搜索弹层的市场过滤 */
+enum class MarketFilter(val label: String) {
+    ALL("全部"),
+    CRYPTO("加密"),
+    STOCK("美股")
+}
+
+/**
+ * 一个可交易标的。id 在 App 内唯一（加密现货当前用 BASEQUOTE，如 BTCUSDT），
+ * symbols 保存每个数据源自己的交易对写法，任何地方都不再从 base 拼接交易对。
+ */
+data class Instrument(
+    val id: String,
+    val displayName: String,
+    val marketType: MarketType,
+    val baseCurrency: String,
+    val quoteCurrency: String,
+    /** 价格显示小数位，由交易所 tickSize 推导 */
+    val priceDecimals: Int,
+    val symbols: Map<String, String>,
+    /** 公司全名（美股），加密标的为空 */
+    val name: String = "",
+    val pricePrefix: String = "$",
+    val accent: Long = 0xFF7FA8FF,
+    val glyph: String = baseCurrency.take(1),
+    val hot: Boolean = false,
+    /** 股票形态：永续 / 代币现货；加密标的为 null */
+    val stockKind: StockKind? = null
+) {
+    fun symbolFor(provider: String): String? = symbols[provider]
+}
+
+/**
+ * 内置常用标的与标的工具。已知币种在三个交易所的符号都是字面量映射，
+ * 搜索得到的标的则携带交易所返回的符号。
+ */
+object Instruments {
+
+    val BTC = known("BTC", 2, 0xFFF7931A, "₿", "BTCUSDT", "BTC-USDT", "BTCUSDT")
+    val ETH = known("ETH", 2, 0xFF8C9EFF, "Ξ", "ETHUSDT", "ETH-USDT", "ETHUSDT")
+    val SOL = known("SOL", 2, 0xFF9D7BFF, "S", "SOLUSDT", "SOL-USDT", "SOLUSDT")
+    val BNB = known("BNB", 2, 0xFFF3BA2F, "B", "BNBUSDT", "BNB-USDT", "BNBUSDT")
+    val DOGE = known("DOGE", 5, 0xFFC2A633, "D", "DOGEUSDT", "DOGE-USDT", "DOGEUSDT")
+    val XRP = known("XRP", 4, 0xFF6FA8FF, "X", "XRPUSDT", "XRP-USDT", "XRPUSDT")
+    val ADA = known("ADA", 4, 0xFF3F8CFF, "A", "ADAUSDT", "ADA-USDT", "ADAUSDT")
+    val AVAX = known("AVAX", 2, 0xFFE84142, "A", "AVAXUSDT", "AVAX-USDT", "AVAXUSDT")
+    val LINK = known("LINK", 3, 0xFF4A90E2, "L", "LINKUSDT", "LINK-USDT", "LINKUSDT")
+    val TON = known("TON", 3, 0xFF0098EA, "T", "TONUSDT", "TON-USDT", "TONUSDT")
+
+    /** 热门列表：不联网也能直接切 */
+    val HOT: List<Instrument> = listOf(BTC, ETH, SOL, BNB, DOGE, XRP, ADA, AVAX, LINK, TON)
+
+    private val KNOWN: List<Instrument> = HOT
+
+    fun byId(id: String?): Instrument? = KNOWN.firstOrNull { it.id == id }
+
+    fun byBase(base: String?): Instrument? {
+        val b = base?.trim()?.uppercase() ?: return null
+        return KNOWN.firstOrNull { it.baseCurrency == b }
+    }
+
+    /** 旧版本只存了 Coin 枚举名（BTC/ETH/...），读不到就回退 BTC */
+    fun fromLegacyName(name: String?): Instrument = byBase(name) ?: BTC
+
+    fun isHot(base: String): Boolean = KNOWN.any { it.baseCurrency.equals(base, ignoreCase = true) }
+
+    /** 搜索/目录里的标的：quote 默认 USDT，符号按交易所各自返回 */
+    fun crypto(
+        base: String,
+        priceDecimals: Int,
+        symbols: Map<String, String>,
+        quote: String = "USDT"
+    ): Instrument {
+        val b = base.trim().uppercase()
+        val q = quote.trim().uppercase()
+        return Instrument(
+            id = b + q,
+            displayName = "$b / $q",
+            marketType = MarketType.CRYPTO,
+            baseCurrency = b,
+            quoteCurrency = q,
+            priceDecimals = priceDecimals.coerceIn(0, 8),
+            symbols = symbols,
+            accent = accentFor(b),
+            glyph = glyphFor(b),
+            hot = isHot(b)
+        )
+    }
+
+    /**
+     * 正股/ETF。id 为代码（与加密币冲突时加 stock: 前缀），
+     * 代币化现货再加 .x 后缀，永续与现货因此是两个独立条目。
+     */
+    fun stock(
+        ticker: String,
+        company: String = "",
+        priceDecimals: Int = 2,
+        symbols: Map<String, String> = emptyMap(),
+        kind: StockKind = StockKind.PERP,
+        cryptoBases: Set<String> = emptySet()
+    ): Instrument {
+        val t = ticker.trim().uppercase()
+        val c = company.trim().ifBlank { StockUniverse.companyName(t).orEmpty() }
+        val id = stockId(t, cryptoBases) + if (kind == StockKind.TOKENIZED) ".x" else ""
+        return Instrument(
+            id = id,
+            displayName = c.ifBlank { t },
+            marketType = MarketType.STOCK,
+            baseCurrency = t,
+            quoteCurrency = "USD",
+            priceDecimals = priceDecimals.coerceIn(0, 8),
+            symbols = symbols,
+            name = c,
+            pricePrefix = "$",
+            accent = 0xFF5B9DFF,
+            glyph = t.take(1),
+            hot = StockUniverse.isHot(t) && kind == StockKind.PERP,
+            stockKind = kind
+        )
+    }
+
+    /** 内置加密币代码和正股重名时（SOL 等）预先加前缀；交易所目录里的冲突由调用方传入 */
+    fun stockId(ticker: String, cryptoBases: Set<String> = emptySet()): String {
+        val t = ticker.trim().uppercase()
+        val clash = KNOWN.any { it.baseCurrency.equals(t, ignoreCase = true) } ||
+            cryptoBases.any { it.equals(t, ignoreCase = true) }
+        return if (clash) STOCK_ID_PREFIX + t else t
+    }
+
+    /** 同一标的在多个交易所的搜索结果合并成一个，符号取并集，公司名取第一个非空 */
+    fun merge(items: List<Instrument>): List<Instrument> {
+        if (items.isEmpty()) return emptyList()
+        val cryptoBases = LinkedHashSet<String>()
+        val cryptoIds = LinkedHashSet<String>()
+        for (inst in items) {
+            if (inst.marketType == MarketType.CRYPTO) {
+                cryptoBases.add(inst.baseCurrency.uppercase())
+                cryptoIds.add(inst.id)
+            }
+        }
+        val normalized = items.map { inst ->
+            if (inst.marketType != MarketType.STOCK || inst.id.startsWith(STOCK_ID_PREFIX)) {
+                inst
+            } else {
+                val suffix = if (inst.stockKind == StockKind.TOKENIZED) ".x" else ""
+                val bare = inst.id.removeSuffix(suffix)
+                if (bare.uppercase() in cryptoBases || inst.id in cryptoIds) {
+                    inst.copy(id = STOCK_ID_PREFIX + inst.id)
+                } else {
+                    inst
+                }
+            }
+        }
+        return normalized.groupBy { it.id }.values.map { group ->
+            val symbols = LinkedHashMap<String, String>()
+            for (inst in group) symbols.putAll(inst.symbols)
+            val first = group.first()
+            val company = group.firstNotNullOfOrNull { it.name.takeIf(String::isNotBlank) }.orEmpty()
+            val display = if (first.marketType == MarketType.STOCK && company.isNotBlank()) {
+                company
+            } else {
+                first.displayName.ifBlank { first.baseCurrency }
+            }
+            first.copy(
+                displayName = display,
+                name = company,
+                symbols = symbols,
+                priceDecimals = group.maxOf { it.priceDecimals },
+                hot = group.any { it.hot } ||
+                    (first.stockKind != StockKind.TOKENIZED && isHot(first.baseCurrency))
+            )
+        }.sortedWith(
+            compareBy<Instrument> { !it.hot }
+                .thenBy { it.baseCurrency }
+                .thenBy { if (it.stockKind == StockKind.TOKENIZED) 1 else 0 }
+                .thenBy { it.id }
+        )
+    }
+
+    private fun known(
+        base: String,
+        decimals: Int,
+        accent: Long,
+        glyph: String,
+        binance: String,
+        okx: String,
+        bybit: String
+    ): Instrument = Instrument(
+        id = base + "USDT",
+        displayName = "$base / USDT",
+        marketType = MarketType.CRYPTO,
+        baseCurrency = base,
+        quoteCurrency = "USDT",
+        priceDecimals = decimals,
+        symbols = mapOf(
+            PROVIDER_BINANCE to binance,
+            PROVIDER_OKX to okx,
+            PROVIDER_BYBIT to bybit
+        ),
+        accent = accent,
+        glyph = glyph,
+        hot = true
+    )
+
+    private fun accentFor(base: String): Long = when (base) {
+        "BTC" -> 0xFFF7931A
+        "ETH" -> 0xFF8C9EFF
+        "SOL" -> 0xFF9D7BFF
+        "BNB" -> 0xFFF3BA2F
+        "DOGE" -> 0xFFC2A633
+        "XRP" -> 0xFF6FA8FF
+        "ADA" -> 0xFF3F8CFF
+        "AVAX" -> 0xFFE84142
+        "LINK" -> 0xFF4A90E2
+        "TON" -> 0xFF0098EA
+        else -> 0xFF7FA8FF
+    }
+
+    private fun glyphFor(base: String): String = when (base) {
+        "BTC" -> "₿"
+        "ETH" -> "Ξ"
+        else -> base.take(1)
+    }
 }
 
 enum class Conn { CONNECTING, LIVE, POLLING, OFFLINE }
@@ -74,7 +299,7 @@ enum class ChartStyle(val label: String) {
 
 /** 界面唯一数据源；不含任何 Android 依赖，方便离屏渲染验收 */
 data class UiState(
-    val coin: Coin = Coin.BTC,
+    val instrument: Instrument = Instruments.BTC,
     val tf: TF = TF.M1,
     val candles: List<Candle> = emptyList(),
     val price: Double = 0.0,
@@ -92,5 +317,29 @@ data class UiState(
     /** 图表显示最近多少根K线（遥控器 ▲▼ 缩放） */
     val zoom: Int = 120,
     val firstLoad: Boolean = true,
-    val tickCount: Long = 0
+    val tickCount: Long = 0,
+    // ---- 指标 ----
+    /** 全部关闭 = 与旧版一致的干净画面 */
+    val indicatorSettings: IndicatorSettings = IndicatorSettings.DEFAULT,
+    /** ViewModel 预先算好的结果，key 为 IndicatorSpec.id；Compose 只读 */
+    val indicatorResults: Map<String, IndicatorResult> = emptyMap(),
+    /** 设置页里展开了参数的指标 id；BACK 先收它 */
+    val expandedIndicator: String? = null,
+    /** 设置页里折叠起来的分组（IndicatorGroup.name） */
+    val collapsedIndicatorGroups: Set<String> = emptySet(),
+    /** 例如副图已满 3 个时的提示 */
+    val indicatorNotice: String? = null,
+    /** candles 的修订号；只有内容真的变了才 +1，指标缓存按它命中 */
+    val dataRevision: Long = 0,
+    // ---- 标的搜索 ----
+    val searchOpen: Boolean = false,
+    val searchQuery: String = "",
+    val searchResults: List<Instrument> = emptyList(),
+    val searchFilter: MarketFilter = MarketFilter.ALL,
+    val searching: Boolean = false,
+    val recent: List<Instrument> = emptyList(),
+    val favorites: List<Instrument> = emptyList(),
+    val hot: List<Instrument> = Instruments.HOT,
+    val catalogLoading: Boolean = false,
+    val catalogReady: Boolean = false
 )

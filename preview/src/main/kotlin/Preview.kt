@@ -1,13 +1,17 @@
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.unit.Density
 import com.milolab.btctv.data.Candle
 import com.milolab.btctv.data.ChartStyle
-import com.milolab.btctv.data.Coin
+import com.milolab.btctv.data.IndicatorSettings
+import com.milolab.btctv.data.Instruments
 import com.milolab.btctv.data.Conn
 import com.milolab.btctv.data.Quote
 import com.milolab.btctv.data.TF
 import com.milolab.btctv.data.UiState
+import com.milolab.btctv.data.indicators.IndicatorEngine
 import com.milolab.btctv.ui.AppTheme
 import com.milolab.btctv.ui.TvScreenInner
 import com.milolab.btctv.ui.UiActions
@@ -38,7 +42,7 @@ private fun candles(n: Int, start: Double, seed: Long, driftPerStep: Double = 1.
 }
 
 fun main(args: Array<String>) {
-    val outDir = File(args.getOrElse(0) { "shots" })
+    val outDir = File(args.getOrElse(0) { "out" })
     outDir.mkdirs()
     val cs = candles(150, 71_180.0, 20261112L, driftPerStep = 3.4, vol = 24.0)
     val last = cs.last().c
@@ -47,7 +51,7 @@ fun main(args: Array<String>) {
     val open24 = cs.first().o
 
     val base = UiState(
-        coin = Coin.BTC,
+        instrument = Instruments.BTC,
         tf = TF.M1,
         candles = cs,
         price = last,
@@ -71,7 +75,7 @@ fun main(args: Array<String>) {
     render(
         outDir, "05-eth.png",
         base.copy(
-            coin = Coin.ETH,
+            instrument = Instruments.ETH,
             candles = candles(150, 3_180.0, 99L, 0.6, 3.2),
             price = 0.0,
             quote = null
@@ -89,7 +93,47 @@ fun main(args: Array<String>) {
     render(outDir, "11-4k.png", base, w = 3840, h = 2160, density = 2f)
     render(outDir, "07-style-minimal.png", base, custom = { StyleMinimal(base) })
     render(outDir, "08-style-neon.png", base, custom = { StyleNeon(base) })
-    println("ok")
+
+    // ---- 指标验收：默认全关的干净画面 + 1/2/3 个副图 ----
+    render(outDir, "20-all-off.png", withIndicators(base, IndicatorSettings.DEFAULT))
+
+    val overlayOnly = IndicatorSettings.DEFAULT
+        .withToggled("ema")
+        .withToggled("boll")
+        .withToggled("vwap")
+        .withToggled("pivot")
+        .withParam("pivot", "basis", 0.0)
+
+    val oneOsc = overlayOnly.withToggled("rsi")
+    val twoOsc = oneOsc.withToggled("macd")
+    val threeOsc = twoOsc.withToggled("kdj")
+
+    render(outDir, "21-indicators-osc1.png", withIndicators(base, oneOsc))
+    render(outDir, "22-indicators-osc2.png", withIndicators(base, twoOsc))
+    render(outDir, "23-indicators-osc3.png", withIndicators(base, threeOsc))
+    render(
+        outDir,
+        "24-indicator-settings.png",
+        withIndicators(base, twoOsc).copy(
+            settingsOpen = true,
+            expandedIndicator = "rsi",
+            // 把上面的三组折起来，让 1080p 截图能同时看到副图开关和展开的参数行。
+            collapsedIndicatorGroups = setOf("OVERLAY", "REGRESSION", "LEVELS")
+        ),
+        scrollEvents = 60,
+        scrollStep = 300f
+    )
+
+    println("ok -> ${outDir.absolutePath}")
+}
+
+/** 离屏渲染没有 ViewModel，指标结果在渲染前一次算好，和真机 UiState 的结构一致。 */
+private fun withIndicators(
+    st: UiState,
+    settings: IndicatorSettings
+): UiState {
+    val results = IndicatorEngine().compute(settings, st.candles, revision = 1L)
+    return st.copy(indicatorSettings = settings, indicatorResults = results)
 }
 
 private fun render(
@@ -99,11 +143,26 @@ private fun render(
     custom: (@Composable () -> Unit)? = null,
     w: Int = 1920,
     h: Int = 1080,
-    density: Float = 2f
+    density: Float = 2f,
+    scrollEvents: Int = 0,
+    scrollStep: Float = 1f
 ) {
     val scene = ImageComposeScene(w, h, Density(density)) {
         AppTheme {
             if (custom != null) custom() else TvScreenInner(st = st, act = UiActions())
+        }
+    }
+    scene.render()
+    if (scrollEvents > 0) {
+        val at = Offset(w / 2f, h / 2f)
+        scene.sendPointerEvent(PointerEventType.Move, at)
+        repeat(scrollEvents) {
+            scene.sendPointerEvent(
+                eventType = PointerEventType.Scroll,
+                position = at,
+                scrollDelta = Offset(0f, scrollStep)
+            )
+            scene.render()
         }
     }
     val img = scene.render()

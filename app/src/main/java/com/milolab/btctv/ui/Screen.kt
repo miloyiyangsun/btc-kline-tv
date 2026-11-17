@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.milolab.btctv.ui
 
 import androidx.compose.animation.core.Animatable
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,8 +28,12 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.focusable
@@ -46,6 +54,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
@@ -60,18 +69,24 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.milolab.btctv.data.IndicatorGroup
 import com.milolab.btctv.data.UiState
 import com.milolab.btctv.data.ChartStyle
-import com.milolab.btctv.data.Coin
 import com.milolab.btctv.data.Conn
+import com.milolab.btctv.data.MarketType
 import com.milolab.btctv.data.TF
+import com.milolab.btctv.data.indicators.IndicatorSpec
+import com.milolab.btctv.data.paramValueLabel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.sin
 @Composable
 fun TvScreenInner(st: UiState, act: UiActions) {
-    val accent = Color(st.coin.accent)
+    val accent = Color(st.instrument.accent)
     val rootFocus = remember { FocusRequester() }
 
     val clock by produceState(initialValue = System.currentTimeMillis()) {
@@ -81,9 +96,9 @@ fun TvScreenInner(st: UiState, act: UiActions) {
         }
     }
 
-    // 设置关闭后把焦点还给主界面，遥控器才能继续控制周期/缩放
-    LaunchedEffect(st.settingsOpen) {
-        if (!st.settingsOpen) {
+    // 设置/搜索面板关闭后把焦点还给主界面，遥控器才能继续控制周期/缩放
+    LaunchedEffect(st.settingsOpen, st.searchOpen) {
+        if (!st.settingsOpen && !st.searchOpen) {
             delay(60)
             runCatching { rootFocus.requestFocus() }
         }
@@ -94,13 +109,15 @@ fun TvScreenInner(st: UiState, act: UiActions) {
             .fillMaxSize()
             .background(C.Bg)
             .focusRequester(rootFocus)
+            .focusProperties { canFocus = !st.settingsOpen && !st.searchOpen }
             .focusable()
             .onKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
-                when (val intent = routeKey(st.settingsOpen, ev.key)) {
+                when (val intent = routeKey(st.settingsOpen, st.searchOpen, ev.key)) {
                     is KeyIntent.ChangeTf -> { act.setTf(st.tf.step(intent.delta)); true }
                     is KeyIntent.Zoom -> { act.zoom(intent.delta); true }
                     KeyIntent.OpenSettings -> { act.openSettings(); true }
+                    KeyIntent.OpenSearch -> { act.openSearch(); true }
                     KeyIntent.None -> false
                 }
             }
@@ -127,7 +144,7 @@ fun TvScreenInner(st: UiState, act: UiActions) {
                 .offset(driftX, driftY)
                 .padding(horizontal = (42f * s).dp, vertical = (24f * s).dp)
         ) {
-            Header(st, accent, s, clock)
+            Header(st, accent, s, clock, act)
             Spacer(Modifier.height((10f * s).dp))
             PriceBlock(st, accent, s)
             Spacer(Modifier.height((10f * s).dp))
@@ -139,13 +156,16 @@ fun TvScreenInner(st: UiState, act: UiActions) {
         if (st.settingsOpen) {
             SettingsOverlay(st, accent, s, act)
         }
+        if (st.searchOpen) {
+            SearchOverlay(st, accent, s, act)
+        }
     }
 }
 
 // ------------------------------------------------------------------ 顶部
 
 @Composable
-private fun Header(st: UiState, accent: Color, s: Float, clock: Long) {
+private fun Header(st: UiState, accent: Color, s: Float, clock: Long, act: UiActions) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier
@@ -156,23 +176,43 @@ private fun Header(st: UiState, accent: Color, s: Float, clock: Long) {
             contentAlignment = Alignment.Center
         ) {
             Text(
-                st.coin.glyph,
+                st.instrument.glyph,
                 color = accent,
                 fontSize = (26f * s).sp,
                 fontWeight = FontWeight.Bold
             )
         }
         Spacer(Modifier.width((14f * s).dp))
-        Column {
+        Column(
+            Modifier
+                // 面板打开时禁止焦点跑回标题入口，避免按键漏到下层
+                .focusProperties { canFocus = !st.settingsOpen && !st.searchOpen }
+                .clip(RoundedCornerShape((10f * s).dp))
+                .clickable { act.openSearch() }
+                .padding(horizontal = (8f * s).dp, vertical = (3f * s).dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    st.instrument.displayName,
+                    color = C.Text,
+                    fontSize = (23f * s).sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (1.6f * s).sp
+                )
+                Spacer(Modifier.width((8f * s).dp))
+                Text(
+                    "▾",
+                    color = accent,
+                    fontSize = (15f * s).sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             Text(
-                st.coin.base + " / USDT",
-                color = C.Text,
-                fontSize = (23f * s).sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = (1.6f * s).sp
-            )
-            Text(
-                "实时行情 · " + (st.provider ?: "接入中"),
+                if (st.instrument.marketType == MarketType.STOCK) {
+                    "美股行情 · OKX　MENU 切换标的"
+                } else {
+                    "实时行情 · " + (st.provider ?: "接入中") + "　MENU 切换标的"
+                },
                 color = C.Dim,
                 fontSize = (12f * s).sp,
                 letterSpacing = (0.8f * s).sp
@@ -243,16 +283,20 @@ private fun ConnBadge(conn: Conn, s: Float) {
 @Composable
 private fun PriceBlock(st: UiState, accent: Color, s: Float) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-        BigPrice(st.price, st.prevPrice, st.flash, s)
+        BigPrice(st.price, st.prevPrice, st.flash, st.instrument.pricePrefix, st.instrument.priceDecimals, s)
         Spacer(Modifier.width((18f * s).dp))
         ChangePill(st, s, Modifier.padding(bottom = (36f * s).dp))
         Spacer(Modifier.weight(1f))
         Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(bottom = (4f * s).dp)) {
-            StatLine("24H 最高", st.quote?.high24h?.let { fmtPrice(it) }, s)
+            StatLine("24H 最高", st.quote?.high24h?.let { fmtPrice(it, st.instrument.priceDecimals) }, s)
             Spacer(Modifier.height((8f * s).dp))
-            StatLine("24H 最低", st.quote?.low24h?.let { fmtPrice(it) }, s)
+            StatLine("24H 最低", st.quote?.low24h?.let { fmtPrice(it, st.instrument.priceDecimals) }, s)
             Spacer(Modifier.height((8f * s).dp))
-            StatLine("24H 成交", st.quote?.vol24h?.let { fmtVol(it) + " BTC" }, s)
+            StatLine(
+                "24H 成交",
+                st.quote?.vol24h?.let { fmtVol(it) + " " + st.instrument.baseCurrency },
+                s
+            )
         }
     }
 }
@@ -280,7 +324,7 @@ private fun ChangePill(st: UiState, s: Float, modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.width((10f * s).dp))
             Text(
-                fmtSigned(abs),
+                fmtSigned(abs, st.instrument.priceDecimals),
                 color = col.copy(alpha = 0.7f),
                 fontSize = (15f * s).sp,
                 style = TextStyle(fontFeatureSettings = "tnum")
@@ -318,7 +362,7 @@ private fun StatLine(label: String, value: String?, s: Float) {
 }
 
 @Composable
-private fun BigPrice(price: Double, prev: Double, flashOn: Boolean, s: Float) {
+private fun BigPrice(price: Double, prev: Double, flashOn: Boolean, prefix: String, decimals: Int, s: Float) {
     val anim = remember { Animatable(0f) }
     var dir by remember { mutableStateOf(1) }
 
@@ -335,14 +379,14 @@ private fun BigPrice(price: Double, prev: Double, flashOn: Boolean, s: Float) {
 
     Row(verticalAlignment = Alignment.Bottom) {
         Text(
-            "$",
+            prefix,
             color = C.Dimmer,
             fontSize = (38f * s).sp,
             fontWeight = FontWeight.Light,
             modifier = Modifier.alignByBaseline().padding(end = (8f * s).dp)
         )
         Text(
-            if (price > 0) fmtPrice(price) else "— — —",
+            if (price > 0) fmtPrice(price, decimals) else "— — —",
             color = color,
             fontSize = (96f * s).sp,
             fontWeight = FontWeight.Bold,
@@ -377,7 +421,7 @@ private fun ChartCard(st: UiState, accent: Color, s: Float, modifier: Modifier) 
             LoadingChart(st, accent, s)
         } else {
             PriceChart(
-                candles = st.candles.takeLast(st.zoom.coerceAtMost(st.candles.size)),
+                candles = st.candles,
                 style = st.style,
                 showVolume = st.showVolume,
                 tf = st.tf,
@@ -385,7 +429,11 @@ private fun ChartCard(st: UiState, accent: Color, s: Float, modifier: Modifier) 
                 up = C.Up,
                 down = C.Down,
                 s = s,
-                modifier = Modifier.fillMaxSize()
+                priceDecimals = st.instrument.priceDecimals,
+                modifier = Modifier.fillMaxSize(),
+                visibleCount = st.zoom,
+                indicatorSettings = st.indicatorSettings,
+                indicatorResults = st.indicatorResults
             )
         }
     }
@@ -401,7 +449,7 @@ private fun LoadingChart(st: UiState, accent: Color, s: Float) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                st.coin.base + " / USDT",
+                st.instrument.displayName,
                 color = accent.copy(alpha = 0.55f),
                 fontSize = (26f * s).sp,
                 fontWeight = FontWeight.Bold,
@@ -451,7 +499,7 @@ private fun Footer(st: UiState, accent: Color, s: Float, act: UiActions) {
         )
         Spacer(Modifier.weight(1f))
         Text(
-            "◀ ▶ 周期      ▲ ▼ 缩放      OK 设置",
+            "◀ ▶ 周期      ▲ ▼ 缩放      MENU 切换标的      OK 设置",
             color = C.Dimmer,
             fontSize = (12f * s).sp,
             letterSpacing = (0.6f * s).sp
@@ -473,71 +521,405 @@ private fun SettingsOverlay(st: UiState, accent: Color, s: Float, act: UiActions
         val shape = RoundedCornerShape((20f * s).dp)
         Column(
             Modifier
-                .width((760f * s).dp)
+                .width((840f * s).dp)
+                .fillMaxHeight(0.92f)
                 .clip(shape)
                 .background(C.Panel)
                 .border(1.dp, Color(0xFF20283A), shape)
                 .focusGroup()
                 .pointerInput(Unit) { detectTapGestures { } }
-                .padding((28f * s).dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.padding(
+                    start = (26f * s).dp,
+                    end = (20f * s).dp,
+                    top = (20f * s).dp,
+                    bottom = (12f * s).dp
+                ),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text("设置", color = C.Text, fontSize = (24f * s).sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width((14f * s).dp))
+                Text(
+                    "指标已开启 ${st.indicatorSettings.enabledCount}",
+                    color = C.Dimmer,
+                    fontSize = (12f * s).sp
+                )
                 Spacer(Modifier.weight(1f))
-                Text("按 BACK 关闭", color = C.Dimmer, fontSize = (12f * s).sp)
+                MiniActionButton("全部关闭", accent, s) { act.allIndicatorsOff() }
+                MiniActionButton("恢复默认", accent, s) { act.resetIndicators() }
             }
-            Spacer(Modifier.height((18f * s).dp))
 
-            SectionLabel("图表样式", s)
-            Row {
-                val firstFocus = remember { FocusRequester() }
-                LaunchedEffect(Unit) {
-                    // 面板刚出现时节点可能还没挂上，重试几次，保证遥控器一进来就在面板里
-                    repeat(8) {
-                        delay(60)
-                        if (runCatching { firstFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+            val scroll = rememberScrollState()
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(scroll)
+                    .padding(horizontal = (26f * s).dp)
+            ) {
+                SectionLabel("图表样式", s)
+                Row {
+                    val firstFocus = remember { FocusRequester() }
+                    // 只请求一次；定时重试会在离屏渲染里触发 Skiko 崩溃。
+                    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+                    ChartStyle.entries.forEachIndexed { i, style ->
+                        Chip(
+                            style.label,
+                            style == st.style,
+                            accent,
+                            s,
+                            focusRequester = if (i == 0) firstFocus else null
+                        ) { act.setStyle(style) }
                     }
                 }
-                ChartStyle.entries.forEachIndexed { i, style ->
-                    Chip(
-                        style.label,
-                        style == st.style,
-                        accent,
-                        s,
-                        focusRequester = if (i == 0) firstFocus else null
-                    ) { act.setStyle(style) }
+                Spacer(Modifier.height((14f * s).dp))
+
+                ToggleRow("价格跳动闪烁", st.flash, s) { act.toggleFlash() }
+                ToggleRow("防烧屏微位移", st.antiBurn, s) { act.toggleAntiBurn() }
+                ToggleRow("显示时钟", st.showClock, s) { act.toggleClock() }
+                ToggleRow("显示成交量", st.showVolume, s) { act.toggleVolume() }
+                ToggleRow("开机自动启动（部分设备有效）", st.autoStart, s) { act.toggleAutoStart() }
+
+                Spacer(Modifier.height((14f * s).dp))
+                Row {
+                    ActionButton("立即重连", accent, s) { act.reconnect() }
+                    ActionButton("关闭", accent, s) { act.closeSettings() }
+                }
+
+                Spacer(Modifier.height((22f * s).dp))
+                IndicatorSettingsSection(st, accent, s, act)
+
+                Spacer(Modifier.height((18f * s).dp))
+                Row {
+                    ActionButton("全部关闭", accent, s) { act.allIndicatorsOff() }
+                    ActionButton("恢复默认", accent, s) { act.resetIndicators() }
+                }
+                Spacer(Modifier.height((10f * s).dp))
+                Text(
+                    "数据源：OKX（加密币 + 美股永续/代币现货） · Binance / Bybit（加密）　　" +
+                        "方向键移动焦点 · OK 开关 · 长按 OK 或按 ▶ 调参数 · 返回键收起参数",
+                    color = C.Dimmer,
+                    fontSize = (11.5f * s).sp,
+                    modifier = Modifier.padding(bottom = (16f * s).dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun IndicatorSettingsSection(st: UiState, accent: Color, s: Float, act: UiActions) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("指标", color = C.Text, fontSize = (18f * s).sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width((10f * s).dp))
+        Text(
+            "已开启 ${st.indicatorSettings.enabledCount}",
+            color = accent.copy(alpha = 0.85f),
+            fontSize = (11.5f * s).sp
+        )
+    }
+    Spacer(Modifier.height((4f * s).dp))
+    Text(
+        "默认全部关闭。开启后主图/副图才会出现，关掉立即收回。",
+        color = C.Dimmer,
+        fontSize = (11.5f * s).sp
+    )
+    val notice = st.indicatorNotice
+    if (notice != null) {
+        Spacer(Modifier.height((6f * s).dp))
+        Text(notice, color = Color(0xFFFFC46B), fontSize = (12f * s).sp, fontWeight = FontWeight.Medium)
+    }
+    Spacer(Modifier.height((10f * s).dp))
+
+    for (group in IndicatorGroup.entries) {
+        val collapsed = group.name in st.collapsedIndicatorGroups
+        val specs = group.specs()
+        val enabledInGroup = specs.count { st.indicatorSettings.isEnabled(it.id) }
+        IndicatorGroupHeader(
+            label = group.label,
+            count = enabledInGroup,
+            collapsed = collapsed,
+            accent = accent,
+            s = s
+        ) { act.toggleIndicatorGroup(group) }
+
+        if (!collapsed) {
+            for (spec in specs) {
+                val enabled = st.indicatorSettings.isEnabled(spec.id)
+                IndicatorToggleRow(
+                    spec = spec,
+                    enabled = enabled,
+                    summary = st.indicatorSettings.summaryFor(spec),
+                    expanded = st.expandedIndicator == spec.id,
+                    accent = accent,
+                    s = s,
+                    act = act
+                )
+                if (st.expandedIndicator == spec.id) {
+                    if (spec.params.isEmpty()) {
+                        Text(
+                            "无可调参数",
+                            color = C.Dimmer,
+                            fontSize = (11.5f * s).sp,
+                            modifier = Modifier.padding(start = (28f * s).dp, top = (4f * s).dp, bottom = (6f * s).dp)
+                        )
+                    } else {
+                        val params = st.indicatorSettings.paramsFor(spec)
+                        for (ps in spec.params) {
+                            val value = params.d(ps.key, ps.default)
+                            ParamRow(
+                                label = ps.label,
+                                value = paramValueLabel(ps, value),
+                                s = s,
+                                onStep = { delta -> act.stepIndicatorParam(spec.id, ps.key, delta) }
+                            )
+                        }
+                    }
                 }
             }
-            Spacer(Modifier.height((18f * s).dp))
+        }
+        Spacer(Modifier.height((8f * s).dp))
+    }
+}
 
-            ToggleRow("价格跳动闪烁", st.flash, s) { act.toggleFlash() }
-            ToggleRow("防烧屏微位移", st.antiBurn, s) { act.toggleAntiBurn() }
-            ToggleRow("显示时钟", st.showClock, s) { act.toggleClock() }
-            ToggleRow("显示成交量", st.showVolume, s) { act.toggleVolume() }
-            ToggleRow("开机自动启动（部分设备有效）", st.autoStart, s) { act.toggleAutoStart() }
+@Composable
+private fun IndicatorGroupHeader(
+    label: String,
+    count: Int,
+    collapsed: Boolean,
+    accent: Color,
+    s: Float,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
+    val shape = RoundedCornerShape((8f * s).dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bring)
+            .clip(shape)
+            .background(if (focused) Color(0xFF232A3A) else Color(0xFF151A25))
+            .border(
+                if (focused) (2f * s).dp else 1.dp,
+                if (focused) Color(0xFFFFD79A) else C.Grid,
+                shape
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .padding(horizontal = (10f * s).dp, vertical = (8f * s).dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            if (collapsed) "▸" else "▾",
+            color = if (focused) accent else C.Dim,
+            fontSize = (14f * s).sp,
+            modifier = Modifier.width((22f * s).dp)
+        )
+        Text(
+            label,
+            color = if (focused) C.Text else C.Text.copy(alpha = 0.88f),
+            fontSize = (14f * s).sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "已开 $count",
+            color = C.Dimmer,
+            fontSize = (11f * s).sp
+        )
+    }
+}
 
-            Spacer(Modifier.height((18f * s).dp))
-            Row {
-                ActionButton("立即重连", accent, s) { act.reconnect() }
-                ActionButton("关闭", accent, s) { act.closeSettings() }
+@Composable
+private fun IndicatorToggleRow(
+    spec: IndicatorSpec,
+    enabled: Boolean,
+    summary: String,
+    expanded: Boolean,
+    accent: Color,
+    s: Float,
+    act: UiActions
+) {
+    var focused by remember { mutableStateOf(false) }
+    var centerDown by remember { mutableStateOf(false) }
+    var longPressed by remember { mutableStateOf(false) }
+    var holdJob by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
+    val shape = RoundedCornerShape((9f * s).dp)
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bring)
+            .clip(shape)
+            .background(
+                when {
+                    focused -> Color(0xFF232A3A)
+                    enabled -> Color(0xFF141C25)
+                    else -> Color(0x00000000)
+                }
+            )
+            .border(
+                if (focused) (2f * s).dp else if (expanded) 1.dp else 0.dp,
+                if (focused) Color(0xFFFFD79A) else if (expanded) accent.copy(alpha = 0.5f) else Color(0x00000000),
+                shape
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .onKeyEvent { ev ->
+                val ok = ev.key == Key.DirectionCenter || ev.key == Key.Enter || ev.key == Key.NumPadEnter
+                when {
+                    ev.type == KeyEventType.KeyDown && ok -> {
+                        if (!centerDown) {
+                            centerDown = true
+                            longPressed = false
+                            holdJob?.cancel()
+                            holdJob = scope.launch {
+                                delay(620)
+                                if (centerDown) {
+                                    longPressed = true
+                                    act.expandIndicator(spec.id)
+                                }
+                            }
+                        }
+                        true
+                    }
+
+                    ev.type == KeyEventType.KeyUp && ok -> {
+                        holdJob?.cancel()
+                        val wasLong = longPressed
+                        centerDown = false
+                        longPressed = false
+                        if (!wasLong) act.toggleIndicator(spec.id)
+                        true
+                    }
+
+                    ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionRight -> {
+                        act.expandIndicator(spec.id)
+                        true
+                    }
+
+                    else -> false
+                }
             }
-            Spacer(Modifier.height((14f * s).dp))
+            .clickable { act.toggleIndicator(spec.id) }
+            .padding(horizontal = (10f * s).dp, vertical = (7f * s).dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
             Text(
-                "数据源：OKX / Binance / Bybit　自动切换最优线路　　方向键移动焦点 · OK 确认 · 返回键关闭",
+                spec.name,
+                color = if (focused || enabled) C.Text else C.Text.copy(alpha = 0.82f),
+                fontSize = (14.5f * s).sp,
+                fontWeight = if (enabled) FontWeight.Medium else FontWeight.Normal
+            )
+            Text(
+                summary,
                 color = C.Dimmer,
-                fontSize = (12f * s).sp
+                fontSize = (10.5f * s).sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
+        Spacer(Modifier.width((8f * s).dp))
+        Toggle(enabled, s)
+    }
+}
+
+@Composable
+private fun ParamRow(label: String, value: String, s: Float, onStep: (Int) -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
+    val shape = RoundedCornerShape((7f * s).dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = (26f * s).dp, end = (6f * s).dp, top = (2f * s).dp)
+            .bringIntoViewRequester(bring)
+            .clip(shape)
+            .background(if (focused) Color(0xFF232A3A) else Color(0x00000000))
+            .border(
+                if (focused) (2f * s).dp else 0.dp,
+                if (focused) Color(0xFFFFD79A) else Color(0x00000000),
+                shape
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .onKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (ev.key) {
+                    Key.DirectionLeft -> {
+                        onStep(-1)
+                        true
+                    }
+
+                    Key.DirectionRight -> {
+                        onStep(1)
+                        true
+                    }
+
+                    else -> false
+                }
+            }
+            .clickable { onStep(1) }
+            .padding(horizontal = (10f * s).dp, vertical = (5f * s).dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            color = if (focused) C.Text else C.Dim,
+            fontSize = (12.5f * s).sp,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "◀  $value  ▶",
+            color = if (focused) Color(0xFFFFD79A) else C.Text.copy(alpha = 0.78f),
+            fontSize = (12.5f * s).sp,
+            fontWeight = FontWeight.Medium,
+            style = TextStyle(fontFeatureSettings = "tnum")
+        )
+    }
+}
+
+@Composable
+private fun MiniActionButton(label: String, accent: Color, s: Float, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
+    val shape = RoundedCornerShape((8f * s).dp)
+    Box(
+        Modifier
+            .padding(start = (8f * s).dp)
+            .bringIntoViewRequester(bring)
+            .clip(shape)
+            .background(if (focused) accent else C.PanelHigh)
+            .border(if (focused) (2f * s).dp else 1.dp, if (focused) Color(0xFFFFD79A) else C.Grid, shape)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .padding(horizontal = (12f * s).dp, vertical = (7f * s).dp)
+    ) {
+        Text(
+            label,
+            color = if (focused) Color(0xFF0A0C12) else C.Text,
+            fontSize = (12f * s).sp,
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.Medium
+        )
     }
 }
 
 @Composable
 private fun ActionButton(label: String, accent: Color, s: Float, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
     val shape = RoundedCornerShape((9f * s).dp)
     Box(
         Modifier
             .padding(end = (10f * s).dp)
+            .bringIntoViewRequester(bring)
             .graphicsLayer {
                 val k = if (focused) 1.06f else 1f
                 scaleX = k
@@ -580,10 +962,13 @@ private fun Chip(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
     val shape = RoundedCornerShape((9f * s).dp)
     Box(
         Modifier
             .padding(end = (8f * s).dp)
+            .bringIntoViewRequester(bring)
             .graphicsLayer {
                 val k = if (focused) 1.06f else 1f
                 scaleX = k
@@ -613,9 +998,12 @@ private fun Chip(
 @Composable
 private fun ToggleRow(label: String, on: Boolean, s: Float, onChange: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
+    val bring = remember { BringIntoViewRequester() }
+    LaunchedEffect(focused) { if (focused) runCatching { bring.bringIntoView() } }
     Row(
         Modifier
             .fillMaxWidth()
+            .bringIntoViewRequester(bring)
             .clip(RoundedCornerShape((9f * s).dp))
             .background(if (focused) Color(0xFF232A3A) else Color(0x00000000))
             .border(

@@ -21,7 +21,11 @@ val copySources = tasks.register<Copy>("copySources") {
         include("**/*.kt")
     }
     from("../app/src/main/java/com/milolab/btctv/data") {
-        include("Model.kt", "MarketClient.kt")
+        include("*.kt")
+        exclude("InstrumentCatalog.kt")
+    }
+    from("../app/src/main/java") {
+        include("com/milolab/btctv/data/indicators/**/*.kt")
     }
     into(layout.buildDirectory.dir("gen/kotlin"))
 }

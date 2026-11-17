@@ -7,6 +7,8 @@ build/
 captures/
 .cxx/
 preview/shots/
+preview/out/
+preview/build/
 
 # Local config & signing secrets (never commit)
 local.properties
