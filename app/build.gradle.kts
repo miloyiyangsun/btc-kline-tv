@@ -21,8 +21,8 @@ android {
         applicationId = "com.milolab.btctv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
         resourceConfigurations += listOf("zh", "en")
     }
 

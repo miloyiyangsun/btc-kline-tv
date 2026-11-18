@@ -80,10 +80,10 @@ fun PriceChart(
         indicatorSettings.enabledSpecs(IndicatorType.LEVELS)
     }
     val timeFormat = remember(tf) {
-        SimpleDateFormat(if (tf.seconds >= 86_400) "MM-dd" else "HH:mm", Locale.getDefault())
+        SimpleDateFormat(tf.axisPattern, Locale.getDefault())
     }
-    val tooltipFormat = remember {
-        SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+    val tooltipFormat = remember(tf) {
+        SimpleDateFormat(tf.tooltipPattern, Locale.getDefault())
     }
 
     Box(modifier) {
@@ -229,7 +229,8 @@ private fun DrawScope.drawChart(
 
     val plotW = plotRight - plotLeft
     val slot = plotW / count
-    val bodyW = max(slot * 0.66f, 1f)
+    // K线很少时（例如年线只有 9 根）slot 会非常大，给蜡烛宽度封顶，避免撑满全屏
+    val bodyW = min(max(slot * 0.66f, 1f), (24f * s).dp.toPx())
     val xOf: (Int) -> Float = { i -> plotLeft + (i + 0.5f) * slot }
 
     val axisStyle = TextStyle(fontSize = (12f * s).sp, color = C.Dimmer, fontFeatureSettings = "tnum")

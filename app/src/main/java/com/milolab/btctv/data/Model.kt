@@ -1,6 +1,8 @@
 package com.milolab.btctv.data
 
 import com.milolab.btctv.data.indicators.IndicatorResult
+import java.util.Calendar
+import java.util.TimeZone
 
 /** 一根K线，t = 开盘时间(毫秒) */
 data class Candle(
@@ -42,15 +44,96 @@ fun Quote.mergeWith(old: Quote?): Quote {
     )
 }
 
-enum class TF(val label: String, val binance: String, val okx: String, val bybit: String, val seconds: Long) {
+/** 时间轴标签的日期粒度 */
+enum class TfScale { INTRADAY, DAY, MONTH, YEAR }
+
+private const val DAY_MS = 86_400_000L
+private const val WEEK_MS = 7 * DAY_MS
+private val UTC_TZ: TimeZone = TimeZone.getTimeZone("UTC")
+
+private fun utcCalendar(ms: Long): Calendar =
+    Calendar.getInstance(UTC_TZ).apply { timeInMillis = ms }
+
+/**
+ * K线周期。三家交易所各自保存 interval 字符串和名义秒数。
+ * 日及以上的 OKX bar 统一用 utc 变体，切分点与 Binance/Bybit 一致（00:00 UTC）。
+ * 年线三家都没有原生周期，[aggregateFrom] 指向月线，由 MarketClient 聚合。
+ */
+enum class TF(
+    val label: String,
+    val binance: String,
+    val okx: String,
+    val bybit: String,
+    val seconds: Long,
+    val scale: TfScale = TfScale.INTRADAY,
+    val aggregateFrom: TF? = null
+) {
     M1("1m", "1m", "1m", "1", 60),
     M5("5m", "5m", "5m", "5", 300),
     M15("15m", "15m", "15m", "15", 900),
+    M30("30m", "30m", "30m", "30", 1800),
     H1("1H", "1h", "1H", "60", 3600),
     H4("4H", "4h", "4H", "240", 14400),
-    D1("1D", "1d", "1D", "D", 86400);
+    H12("12H", "12h", "12Hutc", "720", 43_200),
+    D1("1D", "1d", "1Dutc", "D", 86_400, TfScale.DAY),
+    W1("1W", "1w", "1Wutc", "W", 604_800, TfScale.MONTH),
+    MO1("1M", "1M", "1Mutc", "M", 2_592_000, TfScale.MONTH),
+    Y1("1Y", "", "", "", 31_536_000, TfScale.YEAR, aggregateFrom = MO1);
+
+    /** 有没有原生周期；年线是月线聚合出来的 */
+    val aggregated: Boolean get() = aggregateFrom != null
 
     fun step(delta: Int): TF = entries[Math.floorMod(ordinal + delta, entries.size)]
+
+    /** 时间轴刻度：日以上显示日期，周/月显示年月，年显示年份 */
+    val axisPattern: String
+        get() = when (scale) {
+            TfScale.INTRADAY -> "HH:mm"
+            TfScale.DAY -> "MM-dd"
+            TfScale.MONTH -> "yyyy-MM"
+            TfScale.YEAR -> "yyyy"
+        }
+
+    /** 十字光标浮层的时间格式，规则与时间轴一致 */
+    val tooltipPattern: String
+        get() = if (scale == TfScale.INTRADAY) "MM-dd HH:mm" else axisPattern
+
+    /**
+     * 一根K线所属桶的起点（UTC）。周从周一开始，月/年按日历边界切；
+     * 这些周期长度不固定，不能用 seconds 取整。
+     */
+    fun bucketStart(ms: Long): Long = when (this) {
+        W1 -> {
+            val day = Math.floorDiv(ms, DAY_MS)
+            // 1970-01-01 是周四，以周一为 0 的星期序号 = (epochDay + 3) mod 7
+            (day - Math.floorMod(day + 3, 7)) * DAY_MS
+        }
+
+        D1 -> ms - Math.floorMod(ms, DAY_MS)
+
+        MO1, Y1 -> utcCalendar(ms).apply {
+            set(Calendar.DAY_OF_MONTH, 1)
+            if (this@TF == Y1) set(Calendar.MONTH, Calendar.JANUARY)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        else -> ms - Math.floorMod(ms, seconds * 1000L)
+    }
+
+    /** [bucketStart] 所在桶的下一个桶起点（UTC） */
+    fun nextBucketStart(ms: Long): Long {
+        val start = bucketStart(ms)
+        return when (this) {
+            W1 -> start + WEEK_MS
+            D1 -> start + DAY_MS
+            MO1 -> utcCalendar(start).apply { add(Calendar.MONTH, 1) }.timeInMillis
+            Y1 -> utcCalendar(start).apply { add(Calendar.YEAR, 1) }.timeInMillis
+            else -> start + seconds * 1000L
+        }
+    }
 }
 
 enum class MarketType { CRYPTO, STOCK }

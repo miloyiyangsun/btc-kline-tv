@@ -66,7 +66,15 @@ private val StarColor = Color(0xFFFFC15E)
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
-fun SearchOverlay(st: UiState, accent: Color, s: Float, act: UiActions) {
+fun SearchOverlay(
+    st: UiState,
+    accent: Color,
+    s: Float,
+    act: UiActions,
+    targetLabel: String? = null,
+    targetCurrent: String? = null,
+    onFollowMain: (() -> Unit)? = null
+) {
     val shape = RoundedCornerShape((20f * s).dp)
     val firstFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -99,10 +107,19 @@ fun SearchOverlay(st: UiState, accent: Color, s: Float, act: UiActions) {
                 .padding((26f * s).dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("切换标的", color = C.Text, fontSize = (24f * s).sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (targetLabel != null) "为${targetLabel}选择标的" else "切换标的",
+                    color = C.Text,
+                    fontSize = (24f * s).sp,
+                    fontWeight = FontWeight.Bold
+                )
                 Spacer(Modifier.width((12f * s).dp))
                 Text(
-                    "当前 " + st.instrument.displayName,
+                    if (targetLabel != null && targetCurrent != null) {
+                        "当前 $targetCurrent"
+                    } else {
+                        "当前 " + st.instrument.displayName
+                    },
                     color = accent,
                     fontSize = (14f * s).sp,
                     fontWeight = FontWeight.Medium
@@ -179,6 +196,10 @@ fun SearchOverlay(st: UiState, accent: Color, s: Float, act: UiActions) {
                     accent = accent,
                     s = s
                 ) { act.toggleFavorite(st.instrument) }
+                if (onFollowMain != null) {
+                    Spacer(Modifier.width((10f * s).dp))
+                    SearchAction(label = "跟随主标的", accent = accent, s = s, onClick = onFollowMain)
+                }
             }
             Spacer(Modifier.height((14f * s).dp))
 

@@ -76,16 +76,41 @@ import com.milolab.btctv.data.IndicatorGroup
 import com.milolab.btctv.data.UiState
 import com.milolab.btctv.data.ChartStyle
 import com.milolab.btctv.data.Conn
+import com.milolab.btctv.data.Instruments
 import com.milolab.btctv.data.MarketType
 import com.milolab.btctv.data.TF
 import com.milolab.btctv.data.indicators.IndicatorSpec
 import com.milolab.btctv.data.paramValueLabel
+import com.milolab.btctv.ui.board.BoardActions
+import com.milolab.btctv.ui.board.BoardHost
+import com.milolab.btctv.ui.board.BoardIntent
+import com.milolab.btctv.ui.board.BoardKey
+import com.milolab.btctv.ui.board.BoardMode
+import com.milolab.btctv.ui.board.BoardUiState
+import com.milolab.btctv.ui.board.LayoutSettingsSection
+import com.milolab.btctv.ui.board.SlotContent
+import com.milolab.btctv.ui.board.isChartModule
+import com.milolab.btctv.ui.board.layout.FocusDirection
+import com.milolab.btctv.ui.board.layout.LayoutFocus
+import com.milolab.btctv.ui.board.layout.LayoutGeometry
+import com.milolab.btctv.ui.board.layout.LayoutRect
+import com.milolab.btctv.ui.board.layout.ModuleType
+import com.milolab.btctv.ui.board.layout.SlotBinding
+import com.milolab.btctv.ui.board.mainChartDataFromUi
+import com.milolab.btctv.ui.board.modules.ChartDensity
+import com.milolab.btctv.ui.board.primaryMainSlotId
+import com.milolab.btctv.ui.board.routeBoardKey
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.sin
 @Composable
-fun TvScreenInner(st: UiState, act: UiActions) {
+fun TvScreenInner(
+    st: UiState,
+    act: UiActions,
+    board: BoardUiState = BoardUiState(),
+    b: BoardActions = BoardActions()
+) {
     val accent = Color(st.instrument.accent)
     val rootFocus = remember { FocusRequester() }
 
@@ -108,58 +133,277 @@ fun TvScreenInner(st: UiState, act: UiActions) {
         Modifier
             .fillMaxSize()
             .background(C.Bg)
-            .focusRequester(rootFocus)
-            .focusProperties { canFocus = !st.settingsOpen && !st.searchOpen }
-            .focusable()
-            .onKeyEvent { ev ->
-                if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
-                when (val intent = routeKey(st.settingsOpen, st.searchOpen, ev.key)) {
-                    is KeyIntent.ChangeTf -> { act.setTf(st.tf.step(intent.delta)); true }
-                    is KeyIntent.Zoom -> { act.zoom(intent.delta); true }
-                    KeyIntent.OpenSettings -> { act.openSettings(); true }
-                    KeyIntent.OpenSearch -> { act.openSearch(); true }
-                    KeyIntent.None -> false
-                }
-            }
     ) {
         val s = (maxHeight.value / 540f).coerceIn(0.72f, 2.6f)
-        val driftX = if (st.antiBurn) (sin(clock / 210000.0) * 5.0 * s).dp else 0.dp
-        val driftY = if (st.antiBurn) (sin(clock / 173000.0) * 3.5 * s).dp else 0.dp
+        val boardRects = if (board.active) {
+            LayoutGeometry.solve(board.spec, LayoutRect(0f, 0f, maxWidth.value, maxHeight.value))
+        } else {
+            emptyMap()
+        }
+        val boardMode = when {
+            st.searchOpen -> BoardMode.SEARCH
+            st.settingsOpen -> BoardMode.SETTINGS
+            board.fullscreenSlotId != null -> BoardMode.FULLSCREEN
+            else -> BoardMode.BOARD
+        }
+        val scope = rememberCoroutineScope()
+        var holdKey by remember { mutableStateOf<Key?>(null) }
+        var holdJob by remember { mutableStateOf<Job?>(null) }
+        var longFired by remember { mutableStateOf(false) }
 
-        // 背景：深色渐变 + 币种色氛围光
-        Canvas(Modifier.fillMaxSize()) {
-            drawRect(Brush.verticalGradient(listOf(C.BgTop, C.Bg), startY = 0f, endY = size.height))
-            drawRect(
-                Brush.radialGradient(
-                    colors = listOf(accent.copy(alpha = 0.10f), Color.Transparent),
-                    center = Offset(size.width * 0.18f, size.height * 0.34f),
-                    radius = size.height * 0.9f
-                )
-            )
+        fun boardKeyOf(key: Key): BoardKey? = when (key) {
+            Key.DirectionLeft -> BoardKey.Left
+            Key.DirectionRight -> BoardKey.Right
+            Key.DirectionUp -> BoardKey.Up
+            Key.DirectionDown -> BoardKey.Down
+            Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> BoardKey.Ok
+            Key.Back -> BoardKey.Back
+            Key.Menu, Key.Search -> BoardKey.Menu
+            else -> null
         }
 
-        Column(
+        fun boardIntent(bk: BoardKey, longPress: Boolean): BoardIntent {
+            val focusId = board.focusId
+            val slot = focusId?.let { board.spec.slots[it] }
+            val isChart = slot?.let { isChartModule(it.module) } ?: false
+            val isMain = slot?.module is ModuleType.MainChart
+            val hasNeighbor = when (bk) {
+                BoardKey.Left ->
+                    focusId != null &&
+                        LayoutFocus.next(focusId, boardRects, FocusDirection.Left) != null
+
+                BoardKey.Right ->
+                    focusId != null &&
+                        LayoutFocus.next(focusId, boardRects, FocusDirection.Right) != null
+
+                else -> false
+            }
+            return routeBoardKey(boardMode, bk, isChart, isMain, hasNeighbor, longPress)
+        }
+
+        fun performBoardIntent(intent: BoardIntent) {
+            when (intent) {
+                is BoardIntent.MoveFocus -> {
+                    val id = board.focusId ?: return
+                    LayoutFocus.next(id, boardRects, intent.direction)?.let { b.focusSlot(it) }
+                }
+
+                is BoardIntent.ChangeTf -> act.setTf(st.tf.step(intent.delta))
+                BoardIntent.HintNoTimeframe -> b.showHint("该格没有周期（◀▶ 只在图表格切周期）")
+                BoardIntent.EnterFullscreen -> b.enterFullscreen(board.focusId)
+                BoardIntent.ExitFullscreen -> b.enterFullscreen(null)
+                BoardIntent.OpenSlotSearch ->
+                    board.focusId?.let { b.openSlotSearch(it) } ?: b.showHint("没有可编辑的格子")
+
+                BoardIntent.OpenSettings -> act.openSettings()
+                BoardIntent.CloseSearch -> act.closeSearch()
+                BoardIntent.None -> Unit
+            }
+        }
+
+        Box(
             Modifier
                 .fillMaxSize()
-                .offset(driftX, driftY)
-                .padding(horizontal = (42f * s).dp, vertical = (24f * s).dp)
-        ) {
-            Header(st, accent, s, clock, act)
-            Spacer(Modifier.height((10f * s).dp))
-            PriceBlock(st, accent, s)
-            Spacer(Modifier.height((10f * s).dp))
-            ChartCard(st, accent, s, Modifier.weight(1f))
-            Spacer(Modifier.height((10f * s).dp))
-            Footer(st, accent, s, act)
-        }
+                .focusRequester(rootFocus)
+                .focusProperties { canFocus = !st.settingsOpen && !st.searchOpen }
+                .focusable()
+                .onKeyEvent { ev ->
+                    if (st.settingsOpen || st.searchOpen) return@onKeyEvent false
+                    if (!board.active) {
+                        if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
+                        when (val intent = routeKey(false, false, ev.key)) {
+                            is KeyIntent.ChangeTf -> {
+                                act.setTf(st.tf.step(intent.delta)); true
+                            }
 
-        if (st.settingsOpen) {
-            SettingsOverlay(st, accent, s, act)
-        }
-        if (st.searchOpen) {
-            SearchOverlay(st, accent, s, act)
+                            is KeyIntent.Zoom -> {
+                                act.zoom(intent.delta); true
+                            }
+
+                            KeyIntent.OpenSettings -> {
+                                act.openSettings(); true
+                            }
+
+                            KeyIntent.OpenSearch -> {
+                                act.openSearch(); true
+                            }
+
+                            KeyIntent.None -> false
+                        }
+                    } else {
+                        val bk = boardKeyOf(ev.key) ?: return@onKeyEvent false
+                        val horizontal = bk == BoardKey.Left || bk == BoardKey.Right
+                        if (horizontal && boardMode == BoardMode.BOARD) {
+                            // 短按在 KeyUp 时执行；按住 ≥400ms 直接切周期，且不再触发短按动作
+                            when (ev.type) {
+                                KeyEventType.KeyDown -> {
+                                    if (holdKey == ev.key) return@onKeyEvent true
+                                    holdKey = ev.key
+                                    longFired = false
+                                    holdJob?.cancel()
+                                    holdJob = scope.launch {
+                                        delay(400)
+                                        if (holdKey == ev.key) {
+                                            longFired = true
+                                            performBoardIntent(boardIntent(bk, longPress = true))
+                                        }
+                                    }
+                                    true
+                                }
+
+                                KeyEventType.KeyUp -> {
+                                    if (holdKey != ev.key) return@onKeyEvent true
+                                    holdJob?.cancel()
+                                    holdJob = null
+                                    val fired = longFired
+                                    holdKey = null
+                                    longFired = false
+                                    if (!fired) performBoardIntent(boardIntent(bk, longPress = false))
+                                    true
+                                }
+
+                                else -> false
+                            }
+                        } else {
+                            if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            val intent = boardIntent(bk, longPress = false)
+                            performBoardIntent(intent)
+                            intent != BoardIntent.None
+                        }
+                    }
+                }
+        ) {
+            val driftX = if (st.antiBurn) (sin(clock / 210000.0) * 5.0 * s).dp else 0.dp
+            val driftY = if (st.antiBurn) (sin(clock / 173000.0) * 3.5 * s).dp else 0.dp
+
+            // 背景：深色渐变 + 币种色氛围光
+            Canvas(Modifier.fillMaxSize()) {
+                drawRect(Brush.verticalGradient(listOf(C.BgTop, C.Bg), startY = 0f, endY = size.height))
+                drawRect(
+                    Brush.radialGradient(
+                        colors = listOf(accent.copy(alpha = 0.10f), Color.Transparent),
+                        center = Offset(size.width * 0.18f, size.height * 0.34f),
+                        radius = size.height * 0.9f
+                    )
+                )
+            }
+
+            if (board.active) {
+                val primary = primaryMainSlotId(board.spec)
+                val contents = if (primary != null) {
+                    board.contents + (
+                        primary to SlotContent.Main(
+                            mainChartDataFromUi(st),
+                            ChartDensity.FULL
+                        )
+                        )
+                } else {
+                    board.contents
+                }
+                BoardHost(
+                    spec = board.spec,
+                    contents = contents,
+                    focusSlotId = board.focusId,
+                    fullscreenSlotId = board.fullscreenSlotId,
+                    antiBurn = st.antiBurn,
+                    hint = board.hint,
+                    topHeader = if (board.spec.topChrome > 0f) {
+                        { BoardTopHeader(st, accent, s) }
+                    } else {
+                        null
+                    },
+                    onSlotTap = { b.focusSlot(it) }
+                )
+            } else {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .offset(driftX, driftY)
+                        .padding(horizontal = (42f * s).dp, vertical = (24f * s).dp)
+                ) {
+                    Header(st, accent, s, clock, act)
+                    Spacer(Modifier.height((10f * s).dp))
+                    PriceBlock(st, accent, s)
+                    Spacer(Modifier.height((10f * s).dp))
+                    ChartCard(st, accent, s, Modifier.weight(1f))
+                    Spacer(Modifier.height((10f * s).dp))
+                    Footer(st, accent, s, act)
+                }
+            }
+
+            if (st.settingsOpen) {
+                SettingsOverlay(st, accent, s, act, board, b)
+            }
+            if (st.searchOpen) {
+                val target = board.searchTargetSlotId
+                SearchOverlay(
+                    st = st,
+                    accent = accent,
+                    s = s,
+                    act = act,
+                    targetLabel = target?.let { board.slotLabel(it) },
+                    targetCurrent = target?.let { id ->
+                        board.spec.slots[id]?.let { bindingText(it.binding) }
+                    },
+                    onFollowMain = if (target != null) {
+                        {
+                            b.setSlotBinding(target, SlotBinding.FollowMain)
+                            act.closeSearch()
+                        }
+                    } else {
+                        null
+                    }
+                )
+            }
         }
     }
+}
+
+/** 看板顶部共享头部（目前只用于 multi_tf 的 topChrome 区）。 */
+@Composable
+private fun BoardTopHeader(st: UiState, accent: Color, s: Float) {
+    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            st.instrument.displayName,
+            color = C.Text,
+            fontSize = (18f * s).sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = (1.2f * s).sp
+        )
+        Spacer(Modifier.width((14f * s).dp))
+        Text(
+            if (st.price > 0) fmtPrice(st.price, st.instrument.priceDecimals) else "—",
+            color = accent,
+            fontSize = (18f * s).sp,
+            fontWeight = FontWeight.Bold,
+            style = TextStyle(fontFeatureSettings = "tnum")
+        )
+        val pct = st.quote?.changePct
+        if (pct != null) {
+            Spacer(Modifier.width((10f * s).dp))
+            Text(
+                (if (pct >= 0) "▲ " else "▼ ") + fmtPct(pct),
+                color = if (pct >= 0) C.Up else C.Down,
+                fontSize = (13f * s).sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            "同一标的 · 多周期　OK 全屏主图 · MENU 设置",
+            color = C.Dimmer,
+            fontSize = (11.5f * s).sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private fun bindingText(binding: SlotBinding): String = when (binding) {
+    is SlotBinding.FollowMain -> "跟随主标的"
+    is SlotBinding.Fixed ->
+        "固定 " + (Instruments.byId(binding.instrumentId)?.baseCurrency ?: binding.instrumentId)
 }
 
 // ------------------------------------------------------------------ 顶部
@@ -475,18 +719,20 @@ private fun Footer(st: UiState, accent: Color, s: Float, act: UiActions) {
             val sel = tf == st.tf
             Box(
                 Modifier
-                    .padding(end = (8f * s).dp)
+                    .padding(end = (5f * s).dp)
                     .clip(RoundedCornerShape((9f * s).dp))
                     .background(if (sel) accent else C.Panel)
                     .border(1.dp, if (sel) accent else C.Grid, RoundedCornerShape((9f * s).dp))
                     .pointerInput(tf) { detectTapGestures { act.setTf(tf) } }
-                    .padding(horizontal = (16f * s).dp, vertical = (7f * s).dp)
+                    .padding(horizontal = (8f * s).dp, vertical = (7f * s).dp)
             ) {
                 Text(
                     tf.label,
                     color = if (sel) Color(0xFF0A0C12) else C.Dim,
-                    fontSize = (14f * s).sp,
-                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium
+                    fontSize = (13.5f * s).sp,
+                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -495,14 +741,26 @@ private fun Footer(st: UiState, accent: Color, s: Float, act: UiActions) {
             color = C.Dimmer,
             fontSize = (12f * s).sp,
             letterSpacing = (0.8f * s).sp,
-            modifier = Modifier.padding(start = (6f * s).dp, end = (18f * s).dp)
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.padding(start = (5f * s).dp, end = (10f * s).dp)
         )
-        Spacer(Modifier.weight(1f))
+        // 720p 下 11 个周期按钮已经占满一行：提示文本强制单行并在剩余宽度里省略，
+        // 绝不换行/溢出到画面外。
         Text(
-            "◀ ▶ 周期      ▲ ▼ 缩放      MENU 切换标的      OK 设置",
+            if (s < 1.0f) {
+                "◀▶周期  ▲▼缩放  MENU标的  OK设置"
+            } else {
+                "◀ ▶ 周期      ▲ ▼ 缩放      MENU 切换标的      OK 设置"
+            },
             color = C.Dimmer,
             fontSize = (12f * s).sp,
-            letterSpacing = (0.6f * s).sp
+            letterSpacing = (0.6f * s).sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f)
         )
     }
 }
@@ -510,7 +768,14 @@ private fun Footer(st: UiState, accent: Color, s: Float, act: UiActions) {
 // ------------------------------------------------------------------ 设置
 
 @Composable
-private fun SettingsOverlay(st: UiState, accent: Color, s: Float, act: UiActions) {
+private fun SettingsOverlay(
+    st: UiState,
+    accent: Color,
+    s: Float,
+    act: UiActions,
+    board: BoardUiState,
+    b: BoardActions
+) {
     Box(
         Modifier
             .fillMaxSize()
@@ -557,19 +822,12 @@ private fun SettingsOverlay(st: UiState, accent: Color, s: Float, act: UiActions
                     .verticalScroll(scroll)
                     .padding(horizontal = (26f * s).dp)
             ) {
+                LayoutSettingsSection(board, b, accent, s)
+                Spacer(Modifier.height((20f * s).dp))
                 SectionLabel("图表样式", s)
                 Row {
-                    val firstFocus = remember { FocusRequester() }
-                    // 只请求一次；定时重试会在离屏渲染里触发 Skiko 崩溃。
-                    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
-                    ChartStyle.entries.forEachIndexed { i, style ->
-                        Chip(
-                            style.label,
-                            style == st.style,
-                            accent,
-                            s,
-                            focusRequester = if (i == 0) firstFocus else null
-                        ) { act.setStyle(style) }
+                    ChartStyle.entries.forEach { style ->
+                        Chip(style.label, style == st.style, accent, s) { act.setStyle(style) }
                     }
                 }
                 Spacer(Modifier.height((14f * s).dp))

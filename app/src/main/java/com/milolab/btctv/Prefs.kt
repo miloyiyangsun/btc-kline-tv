@@ -14,6 +14,8 @@ import com.milolab.btctv.data.instrumentFromJson
 import com.milolab.btctv.data.instrumentListFromJson
 import com.milolab.btctv.data.instrumentListToJson
 import com.milolab.btctv.data.instrumentToJson
+import com.milolab.btctv.ui.board.layout.LayoutJson
+import com.milolab.btctv.ui.board.layout.LayoutSpec
 
 class Prefs(context: Context) {
 
@@ -92,12 +94,39 @@ class Prefs(context: Context) {
         get() = IndicatorSettings.decode(sp.getString(KEY_INDICATORS, null))
         set(v) = sp.edit().putString(KEY_INDICATORS, v.encode()).apply()
 
+    /**
+     * 当前看板布局。损坏/未知版本由 LayoutJson 回退 classic，
+     * 所以升级或手改存档都不会白屏。
+     */
+    var layout: LayoutSpec
+        get() = LayoutJson.decode(sp.getString(KEY_LAYOUT, null))
+        set(v) = sp.edit().putString(KEY_LAYOUT, LayoutJson.encode(v)).apply()
+
+    /** v1 只保留一个自定义布局；null 表示还没创建过。 */
+    var customLayout: LayoutSpec?
+        get() = LayoutJson.decodeOrNull(sp.getString(KEY_CUSTOM_LAYOUT, null))
+        set(v) {
+            val editor = sp.edit()
+            if (v == null) {
+                editor.remove(KEY_CUSTOM_LAYOUT)
+            } else {
+                editor.putString(KEY_CUSTOM_LAYOUT, LayoutJson.encode(v))
+            }
+            editor.apply()
+        }
+
+    fun clearLayout() {
+        sp.edit().remove(KEY_LAYOUT).remove(KEY_CUSTOM_LAYOUT).apply()
+    }
+
     private companion object {
         const val KEY_INSTRUMENT = "instrument"
         const val KEY_LEGACY_COIN = "coin"
         const val KEY_RECENT = "recent_instruments"
         const val KEY_FAVORITES = "favorite_instruments"
         const val KEY_INDICATORS = "indicator_settings"
+        const val KEY_LAYOUT = "layout_spec_v1"
+        const val KEY_CUSTOM_LAYOUT = "layout_custom_v1"
         const val RECENT_MAX = 12
         const val FAVORITE_MAX = 30
     }

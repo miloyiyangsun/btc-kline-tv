@@ -19,10 +19,18 @@ kotlin {
 val copySources = tasks.register<Copy>("copySources") {
     from("../app/src/main/java/com/milolab/btctv/ui") {
         include("**/*.kt")
+        include("board/layout/**/*.kt")
     }
     from("../app/src/main/java/com/milolab/btctv/data") {
         include("*.kt")
         exclude("InstrumentCatalog.kt")
+    }
+    from("../app/src/main/java/com/milolab/btctv/data/overview") {
+        include("**/*.kt")
+        exclude("OverviewAndroid.kt")
+    }
+    from("../app/src/main/java/com/milolab/btctv/data/hub") {
+        include("**/*.kt")
     }
     from("../app/src/main/java") {
         include("com/milolab/btctv/data/indicators/**/*.kt")

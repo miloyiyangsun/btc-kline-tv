@@ -3,11 +3,21 @@
 一个打开就看的比特币实时行情大屏：大字号价格 + K 线，遥控器操作，专为投影仪/电视设计。
 
 - 包名：`com.milolab.btctv`
-- 版本：1.2（versionCode 3）
-- 安装包：`dist/BTC-Kline-TV-v1.2.apk`（1.26 MB，已签名，sha256 `4efadad77fe884ff6031ab186ca959ebafd9ae3516d466088d3c9efc6d7a48e2`）
-- 下载：https://github.com/miloyiyangsun/btc-kline-tv/raw/main/dist/BTC-Kline-TV-v1.2.apk
+- 版本：1.3（versionCode 4）
+- 安装包：`dist/BTC-Kline-TV-v1.3.apk`（1.39 MB，已签名，sha256 `43656de4d96e208b310026d6be8269b4d66efeec8ab3e86630ce093da5d6186b`）
+- 下载：https://github.com/miloyiyangsun/btc-kline-tv/raw/main/dist/BTC-Kline-TV-v1.3.apk
 - 支持：Android 6.0+（minSdk 23），arm64 / armv7 / x86 / x86_64 全支持
 - 适配：720p / 1080p / 4K 自动缩放；手机竖屏机器也能装（会横屏显示）
+
+## v1.3 新增
+
+- **11 个周期**：1m / 5m / 15m / 30m / 1H / 4H / 12H / 1D / 1W / 1M / 1Y。年线由月线聚合；周、月、年按日历边界切桶，不是简单按秒数取整。
+- **大盘指标**：BTC 占比（BTCD）、加密总市值、稳定币市值、稳定币占比四张指标卡，带 24H 变化与迷你走势。主源 CoinGecko，备源 CoinPaprika / DefiLlama；失败时保留旧值并标记「更新于 N 分钟前」。
+- **15 种布局 + 自定义分割**：经典单图、单图 + 大盘栏、单图 + 自选、左右 1:1 / 1:2 / 2:1、三分屏（1 大 2 小）、四宫格 K 线、四宫格迷你卡、同币多周期、六宫格、九宫格行情墙、大盘总览、单图 + 跑马灯、三栏工作台。设置 → 布局里点一下立即生效。
+- **多标的行情墙**：价格卡 / 自选列表 / 涨跌榜 / 跑马灯同屏时共用一条 OKX 公共 WebSocket（最多订阅 12 个标的），超出上限或非 OKX 标的自动走 REST 轮询，不会为每格各开一条连接。
+- **涨跌榜**：涨幅榜 / 跌幅榜，支持上下分栏（SPLIT）和标签页（TABS）两种样式；宽格显示成交额，窄格自动隐藏。
+- **跑马灯**：底部滚动显示自选标的与大市场指标，可放进任意布局格。
+- **修复 Binance K 线解析**：兼容数组/对象两种返回格式与缺失字段，切到 Binance 源不再出现空图或断线。
 
 ## v1.2 新增
 
@@ -24,21 +34,21 @@
 3. **adb**（同一局域网）：
    ```
    adb connect <投影仪IP>:5555
-   adb install -r BTC-Kline-TV-v1.2.apk
+   adb install -r BTC-Kline-TV-v1.3.apk
    ```
 
 装完在桌面/应用列表里叫 **「BTC 行情」**，TV 桌面会显示横幅图标。
 
 ## 二、遥控器操作
 
-| 按键 | 作用 |
-|---|---|
-| ◀ / ▶ | 切换周期：1m → 5m → 15m → 1H → 4H → 1D |
-| ▲ / ▼ | 缩放 K 线（45 / 60 / 90 / 120 / 180 / 240 根，底部显示当前根数） |
-| ☰ 菜单键 / 🔍 搜索键 | 打开搜索面板：输入币种或美股代码/中文名（如 SOL、NVDA、英伟达）切换标的 |
-| OK / 确认键 | 打开设置面板 |
-| BACK | 面板打开时关闭面板；主界面按则退出 |
-| ⚙ 设置键 | 部分机型被系统占用会直接跳到系统设置，此时用 ☰ 或 OK |
+| 按键 | 经典单图 | 多格看板 |
+|---|---|---|
+| ◀ / ▶ | 切换周期：1m → 5m → 15m → 30m → 1H → 4H → 12H → 1D → 1W → 1M → 1Y 循环 | 左右移动焦点；没有左右邻居时切换当前格周期；按住 ≥400ms 强制切周期 |
+| ▲ / ▼ | 缩放 K 线（45 / 60 / 90 / 120 / 180 / 240 根，底部显示当前根数） | 上下移动焦点 |
+| OK / 确认键 | 打开设置面板 | 主图格进入全屏；其他格打开改标的搜索 |
+| ☰ 菜单键 / 🔍 搜索键 | 打开搜索面板：输入币种或美股代码/中文名（如 SOL、NVDA、英伟达）切换标的 | 打开设置面板（「布局」在设置最上方） |
+| BACK | 面板打开时关闭面板；主界面按则退出 | 退出全屏 / 关闭面板；看板主界面不退出 |
+| ⚙ 设置键 | 部分机型被系统占用会直接跳到系统设置，此时用 ☰ 或 OK | 同左 |
 
 **设置面板里**：方向键移动焦点（当前项有橙色描边 + 轻微放大），OK 确认/切换，返回键关闭。
 底部还有「立即重连」「关闭」两个按钮，网络抽风时不用退出重进。
@@ -48,17 +58,34 @@
 
 也支持鼠标和触摸：点底部周期按钮切换，设置里可以直接点。
 
-设置面板里可调：**图表样式**（蜡烛/折线/面积）、**价格跳动闪烁**、**防烧屏微位移**、**显示时钟**、**显示成交量**、**开机自动启动**，以及 **31 个技术指标**的开关与参数（默认全关，主图叠加/水平线/副图分开管理）。
+设置面板里可调：**布局**、**图表样式**（蜡烛/折线/面积）、**价格跳动闪烁**、**防烧屏微位移**、**显示时钟**、**显示成交量**、**开机自动启动**，以及 **31 个技术指标**的开关与参数（默认全关，主图叠加/水平线/副图分开管理）。
 
-## 三、数据说明
+## 三、布局怎么用（设置 → 布局）
+
+1. 按 OK（经典界面）或 MENU（看板界面）打开设置，最上方就是「布局」。
+2. 15 张预设卡片，缩略图就是分屏结构；点一下立即应用并保存。经典单图保持原来的单标的界面，其他布局进入多格看板。
+3. 想自己搭：点「进入自定义编辑」→ 先点一个「第 N 格」，然后：
+   - 「左右 / 上下」下面点 **1:1、1:2、2:1、1:1:1** 拆分当前格；
+   - 「合并该格」「删除该格」整理结构（最多 9 格）；
+   - 「模块」可换 **主图 / 迷你图 / 价格卡 / BTC 占比 / 总市值 / 稳定币市值 / 稳定币占比 / 自选列表 / 涨跌榜 / 跑马灯**；
+   - 「标的」选**跟随主标的**或**固定标的**（会打开搜索面板选币/选股）；
+   - 「周期」选**跟随主周期**或固定 11 个周期之一。
+4. 编辑会自动存为「自定义布局」；顶部可「保存自定义布局」「清除自定义布局」「恢复经典布局」。
+5. 回到看板：方向键移动焦点（橙色描边），OK 在主图格全屏、其他格改标的，MENU 再开设置。全屏时 ◀▶ 切周期，BACK 或 OK 返回看板。
+
+设计细节（分割树、模块清单、数据预算、焦点模型）见 [`docs/layouts-design.md`](docs/layouts-design.md)。
+
+## 四、数据说明
 
 - 价格来源：加密币为 **OKX / Binance / Bybit** 三家热备，启动时自动挑最快的一家，界面左上角会显示当前源（如「实时行情 · OKX」）。
 - 美股行情走 **OKX**：支持股票永续与代币化现货，标的目录启动后从 OKX 拉取；搜索面板里可过滤只看加密或只看美股。
+- 多标的同屏：`QuoteHub` 用一条 OKX 公共 WS 订阅最多 12 个标的，集合变化只发增量订阅；超限标的自动 REST 轮询。
+- 大盘总览：CoinGecko 主源，CoinPaprika / DefiLlama 备源；全局与稳定币缓存 120 秒，走势采样 5 分钟一次，失败按 Retry-After 退避。
 - 实时性：WebSocket 逐笔成交推送，价格每秒多次跳动；断线 15 秒自动降级为 REST 轮询，恢复后自动回 WebSocket。
 - 右上角状态点：**实时**=WS 正常，**轮询**=WS 断了用兜底，**离线**=全部线路不通（会自动重试）。
 - 24H 最高/最低/成交量来自交易所 24 小时统计，不是本地计算。
 
-## 四、常见问题
+## 五、常见问题
 
 **Q：打开后一直显示「正在拉取K线…」？**
 投影仪没联网，或所在网络屏蔽了交易所域名。先确认能上网；如果公司/酒店网络拦截，换个热点试试。
@@ -75,46 +102,53 @@ Android 10 以后系统限制后台启动 Activity，部分品牌盒子/投影�
 **Q：v1.0 里设置面板按键没反应/还在改下面的周期？**
 v1.1 已修：按键处理从 Activity 搬进了 Compose 焦点体系，设置打开后方向键只走面板，不再动到下面的周期和时间轴。装 v1.1 覆盖即可。
 
-**Q：怎么更新？**
-用同一签名的新 apk 直接覆盖安装即可（`adb install -r` 或 U 盘重装），设置和数据会保留。
+**Q：多格看板里方向键怎么不切周期了？**
+看板里方向键优先移动焦点；当前格没有左右邻居、或者是图表格时才会切周期。想在任何格强制切周期，按住 ◀/▶ 超过 0.4 秒。
 
-## 五、目录结构（源码）
+**Q：怎么更新？**
+用同一签名的新 apk 直接覆盖安装即可（`adb install -r` 或 U 盘重装），设置、自选和自定义布局都会保留。
+
+## 六、目录结构（源码）
 
 ```
-D:/dev/btc-kline-tv/
+btc-kline-tv/
 ├─ app/src/main/java/com/milolab/btctv/
 │  ├─ MainActivity.kt          全屏 + 遥控器按键
 │  ├─ AppEntry.kt              ViewModel → UI 的接线
 │  ├─ MarketViewModel.kt       会话状态机（重连/看门狗/限流）
-│  ├─ Prefs.kt                 设置持久化
+│  ├─ Prefs.kt                 设置与布局持久化
 │  ├─ BootReceiver.kt          开机自启
-│  └─ data/
-│     ├─ Model.kt              行情模型 + UiState
-│     ├─ MarketClient.kt       交易所 REST + WebSocket 接入
-│     ├─ MarketProvider.kt     OKX / Binance / Bybit 统一接口
-│     ├─ InstrumentCatalog.kt  加密现货 + OKX 美股标的目录
-│     ├─ InstrumentSearch.kt   标的本体搜索 / 中文别名
-│     ├─ Stocks.kt             美股热门清单与永续/代币现货规则
-│     └─ indicators/           31 个技术指标（注册表 / 计算引擎 / 缓存）
-├─ app/src/main/java/com/milolab/btctv/ui/
-│  ├─ Screen.kt                主界面 + 设置面板
-│  ├─ Chart.kt                 K 线画布（自绘，无第三方图表库）
-│  ├─ SearchOverlay.kt         标的搜索切换面板
-│  ├─ Theme.kt / Format.kt     配色 / 数字格式
-│  └─ UiActions.kt             界面回调
+│  ├─ data/
+│  │  ├─ Model.kt              行情模型 + UiState
+│  │  ├─ MarketClient.kt       交易所 REST + WebSocket 接入
+│  │  ├─ MarketProvider.kt     OKX / Binance / Bybit 统一接口
+│  │  ├─ InstrumentCatalog.kt  加密现货 + OKX 美股标的目录
+│  │  ├─ InstrumentSearch.kt   标的本体搜索 / 中文别名
+│  │  ├─ Stocks.kt             美股热门清单与永续/代币现货规则
+│  │  ├─ hub/                  多标的报价中枢 / K 线缓存 / 涨跌榜
+│  │  ├─ overview/             大盘总览（主备源 + 缓存 + 走势采样）
+│  │  └─ indicators/           31 个技术指标（注册表 / 计算引擎 / 缓存）
+│  └─ ui/
+│     ├─ Screen.kt             主界面 + 设置面板
+│     ├─ Chart.kt              K 线画布（自绘，无第三方图表库）
+│     ├─ SearchOverlay.kt      标的搜索切换面板
+│     ├─ Theme.kt / Format.kt  配色 / 数字格式
+│     ├─ KeyRouting.kt         经典界面按键路由
+│     ├─ UiActions.kt          界面回调
+│     └─ board/                多格看板（布局引擎 / 模块 / 布局设置区）
+├─ docs/layouts-design.md      多布局看板引擎设计文档
 ├─ preview/                    离屏渲染工具（无模拟器时验收 UI）
 └─ dist/                       成品 apk
 ```
 
 签名文件 `keys/release.jks` 和口令只保存在本地（`local.properties`，已被 `.gitignore` 排除），仓库里不含任何密钥。
 
-## 六、重新打包
+## 七、重新打包
 
 ```bash
-export JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-17.0.21.9-hotspot"
-export ANDROID_HOME="C:/dev/android-sdk"
-cd /d/dev/btc-kline-tv
-/c/dev/gradle-8.9/bin/gradle.bat assembleRelease
+export JAVA_HOME="<JDK 17 路径>"
+export ANDROID_HOME="<Android SDK 路径>"
+gradle assembleRelease
 # 产物：app/build/outputs/apk/release/app-release.apk
 ```
 
@@ -133,6 +167,6 @@ RELEASE_KEY_PASSWORD=<你的口令>
 
 ```bash
 cd preview
-/c/dev/gradle-8.9/bin/gradle.bat run --args="shots"     # 生成 1080p/720p/4K 截图到 preview/shots
-/c/dev/gradle-8.9/bin/gradle.bat run -PmainClass=LiveProbeKt   # 真连交易所跑一遍数据链路
+gradle run --args="shots"     # 生成 1080p/720p/4K 截图到 preview/shots
+gradle run -PmainClass=LiveProbeKt   # 真连交易所跑一遍数据链路
 ```

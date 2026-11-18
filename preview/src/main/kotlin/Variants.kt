@@ -111,9 +111,9 @@ fun StyleMinimal(st: UiState) {
                     Text(
                         tf.label,
                         color = if (sel) Color(0xFFF7F8FA) else C.Dimmer,
-                        fontSize = (15f * s).sp,
+                        fontSize = (14f * s).sp,
                         letterSpacing = (0.6f * s).sp,
-                        modifier = Modifier.padding(horizontal = (14f * s).dp)
+                        modifier = Modifier.padding(horizontal = (8f * s).dp)
                     )
                 }
             }
@@ -256,15 +256,17 @@ fun StyleNeon(st: UiState) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TF.entries.forEach { tf ->
                     val sel = tf == st.tf
-                    Box(Modifier.padding(end = (8f * s).dp)) {
+                    Box(Modifier.padding(end = (6f * s).dp)) {
                         GlassPill(
                             bg = if (sel) accent.copy(alpha = 0.9f) else Color(0x12FFFFFF),
-                            border = if (sel) accent else Color(0x1AFFFFFF)
+                            border = if (sel) accent else Color(0x1AFFFFFF),
+                            hp = 9f,
+                            vp = 6f
                         ) {
                             Text(
                                 tf.label,
                                 color = if (sel) Color(0xFF0A0C12) else C.Dim,
-                                fontSize = (13f * s).sp,
+                                fontSize = (12.5f * s).sp,
                                 fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
                             )
                         }
@@ -281,6 +283,8 @@ fun StyleNeon(st: UiState) {
 private fun GlassPill(
     bg: Color = Color(0x14FFFFFF),
     border: Color = Color(0x1AFFFFFF),
+    hp: Float = 14f,
+    vp: Float = 7f,
     content: @Composable () -> Unit
 ) {
     val s = 1f
@@ -289,7 +293,7 @@ private fun GlassPill(
             .clip(RoundedCornerShape(50))
             .background(bg)
             .border(1.dp, border, RoundedCornerShape(50))
-            .padding(horizontal = (14f * s).dp, vertical = (7f * s).dp),
+            .padding(horizontal = (hp * s).dp, vertical = (vp * s).dp),
         verticalAlignment = Alignment.CenterVertically
     ) { content() }
 }

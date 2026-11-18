@@ -33,21 +33,30 @@ internal fun decimalsOf(tickSize: String?): Int {
     return scale.coerceIn(0, 8)
 }
 
+/** 元素可能是数字（Binance 时间戳）或字符串（Binance OHLC、OKX/Bybit 全部字段），两种都要收 */
+private fun JSONArray.numberAt(index: Int): Double? = when (val v = opt(index)) {
+    is Number -> v.toDouble()
+    is String -> v.trim().toDoubleOrNull()
+    else -> null
+}
+
+private fun JSONArray.longAt(index: Int): Long? = when (val v = opt(index)) {
+    is Number -> v.toLong()
+    is String -> v.trim().toLongOrNull()
+    else -> null
+}
+
 internal fun JSONArray.toCandles(): List<Candle> {
     val out = ArrayList<Candle>(length())
     for (i in 0 until length()) {
         val a = optJSONArray(i) ?: continue
-        val candle = runCatching {
-            Candle(
-                t = a.getString(0).toLong(),
-                o = a.getString(1).toDouble(),
-                h = a.getString(2).toDouble(),
-                l = a.getString(3).toDouble(),
-                c = a.getString(4).toDouble(),
-                v = a.getString(5).toDouble()
-            )
-        }.getOrNull() ?: continue
-        out.add(candle)
+        val t = a.longAt(0) ?: continue
+        val o = a.numberAt(1) ?: continue
+        val h = a.numberAt(2) ?: continue
+        val l = a.numberAt(3) ?: continue
+        val c = a.numberAt(4) ?: continue
+        val v = a.numberAt(5) ?: continue
+        out.add(Candle(t, o, h, l, c, v))
     }
     return out
 }

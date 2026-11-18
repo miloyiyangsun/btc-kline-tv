@@ -41,6 +41,47 @@ private fun candles(n: Int, start: Double, seed: Long, driftPerStep: Double = 1.
     return out
 }
 
+/** 按周期的 UTC 桶边界生成K线，用于 1W/1Y 这种桶长度不固定的周期截图 */
+private fun bucketCandles(
+    tf: TF,
+    n: Int,
+    start: Double,
+    seed: Long,
+    driftPerBar: Double,
+    vol: Double
+): List<Candle> {
+    val rnd = Random(seed)
+    val times = ArrayList<Long>(n)
+    var t = tf.bucketStart(System.currentTimeMillis())
+    repeat(n) {
+        times.add(t)
+        t = tf.bucketStart(t - 1)
+    }
+    times.reverse()
+    var p = start
+    val out = ArrayList<Candle>(n)
+    for (ts in times) {
+        val o = p
+        val c = max(100.0, o + driftPerBar + (rnd.nextDouble() - 0.5) * vol)
+        val h = max(o, c) + rnd.nextDouble() * vol * 0.8
+        val l = min(o, c) - rnd.nextDouble() * vol * 0.8
+        val v = 8 + rnd.nextDouble() * 60 + abs(c - o) * 0.5
+        out.add(Candle(ts, o, h, l, c, v))
+        p = c
+    }
+    return out
+}
+
+private fun withQuote(st: UiState, candles: List<Candle>): UiState {
+    val last = candles.last()
+    return st.copy(
+        candles = candles,
+        price = last.c,
+        prevPrice = last.c - (last.c - last.o) * 0.4,
+        quote = Quote(last.c, candles.first().o, candles.maxOf { it.h }, candles.minOf { it.l }, 12_430.0)
+    )
+}
+
 fun main(args: Array<String>) {
     val outDir = File(args.getOrElse(0) { "out" })
     outDir.mkdirs()
@@ -122,6 +163,18 @@ fun main(args: Array<String>) {
         ),
         scrollEvents = 60,
         scrollStep = 300f
+    )
+
+    // ---- 长周期验收：年线只有 9 根、周线约一年半 ----
+    render(
+        outDir,
+        "30-tf-1y.png",
+        withQuote(base, bucketCandles(TF.Y1, 9, 3_800.0, 2026L, 7_200.0, 9_000.0)).copy(tf = TF.Y1)
+    )
+    render(
+        outDir,
+        "31-tf-1w.png",
+        withQuote(base, bucketCandles(TF.W1, 78, 52_000.0, 77L, 180.0, 4_200.0)).copy(tf = TF.W1)
     )
 
     println("ok -> ${outDir.absolutePath}")

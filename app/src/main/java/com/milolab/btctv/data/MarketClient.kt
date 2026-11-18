@@ -18,14 +18,14 @@ data class Snapshot(val provider: String, val candles: List<Candle>, val quote: 
  */
 class MarketClient {
 
-    private val http: OkHttpClient = OkHttpClient.Builder()
+    internal val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .callTimeout(16, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
-    private val wsHttp: OkHttpClient = OkHttpClient.Builder()
+    internal val wsHttp: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
@@ -40,8 +40,14 @@ class MarketClient {
 
     // ---------------------------------------------------------------- REST
 
-    suspend fun fetchCandles(provider: String, inst: Instrument, tf: TF, limit: Int = 120): List<Candle> =
-        source(provider).fetchCandles(inst, tf, limit)
+    suspend fun fetchCandles(provider: String, inst: Instrument, tf: TF, limit: Int = 120): List<Candle> {
+        val origin = tf.aggregateFrom ?: return source(provider).fetchCandles(inst, tf, limit)
+        val want = limit.coerceIn(20, 500)
+        // 聚合期只有年线，1 根年线 = 12 根月线；交易所单次最多 500 根，拉不满就用手上有的。
+        val sourceLimit = (want.toLong() * 12 + 12).coerceAtMost(500L).toInt()
+        return aggregateCandles(source(provider).fetchCandles(inst, origin, sourceLimit), tf)
+            .takeLast(want)
+    }
 
     suspend fun fetchQuote(provider: String, inst: Instrument): Quote =
         source(provider).fetchQuote(inst)
@@ -111,20 +117,51 @@ class MarketClient {
     }
 }
 
-/** 用最新价修补最后一根K线（时间跨过周期就补一根新K线） */
-fun List<Candle>.applyTick(price: Double, tfSeconds: Long, nowMs: Long): List<Candle> {
+/**
+ * 把细周期K线按 [tf] 的 UTC 日历桶聚合成大周期K线：
+ * 开=桶内首根开，收=末根收，高=最大，低=最小，量=求和。
+ */
+fun aggregateCandles(candles: List<Candle>, tf: TF): List<Candle> {
+    if (candles.isEmpty()) return emptyList()
+    val out = ArrayList<Candle>()
+    var start = Long.MIN_VALUE
+    var o = 0.0
+    var h = 0.0
+    var l = 0.0
+    var c = 0.0
+    var v = 0.0
+    for (candle in candles.sortedBy { it.t }) {
+        val bucket = tf.bucketStart(candle.t)
+        if (bucket != start) {
+            if (start != Long.MIN_VALUE) out.add(Candle(start, o, h, l, c, v))
+            start = bucket
+            o = candle.o
+            h = candle.h
+            l = candle.l
+            c = candle.c
+            v = candle.v
+        } else {
+            h = max(h, candle.h)
+            l = kotlin.math.min(l, candle.l)
+            c = candle.c
+            v += candle.v
+        }
+    }
+    out.add(Candle(start, o, h, l, c, v))
+    return out
+}
+
+/** 用最新价修补最后一根K线；跨过桶边界就按该周期的 UTC 日历边界补一根新K线 */
+fun List<Candle>.applyTick(price: Double, tf: TF, nowMs: Long): List<Candle> {
     if (isEmpty()) return this
     val last = last()
-    val periodMs = tfSeconds * 1000L
-    val bucket = nowMs / periodMs * periodMs
-    return if (bucket > last.t) {
-        this + Candle(bucket, price, price, price, price, 0.0)
-    } else {
-        val fixed = last.copy(
-            h = max(last.h, price),
-            l = kotlin.math.min(last.l, price),
-            c = price
-        )
-        dropLast(1) + fixed
+    if (nowMs >= tf.nextBucketStart(last.t)) {
+        return this + Candle(tf.bucketStart(nowMs), price, price, price, price, 0.0)
     }
+    val fixed = last.copy(
+        h = max(last.h, price),
+        l = kotlin.math.min(last.l, price),
+        c = price
+    )
+    return dropLast(1) + fixed
 }

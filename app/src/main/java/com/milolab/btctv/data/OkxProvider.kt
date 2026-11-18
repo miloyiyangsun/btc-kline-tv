@@ -73,15 +73,7 @@ internal class OkxProvider(
         )
     }
 
-    override fun parseWs(raw: String): Quote? {
-        val o = runCatching { JSONObject(raw) }.getOrNull() ?: return null
-        if (o.optString("event").isNotEmpty()) return null
-        val d = o.optJSONArray("data") ?: return null
-        if (d.length() == 0) return null
-        val t = d.optJSONObject(0) ?: return null
-        val last = t.num("last") ?: return null
-        return Quote(last, t.num("open24h"), t.num("high24h"), t.num("low24h"), t.num("vol24h"), t.num("volCcy24h"))
-    }
+    override fun parseWs(raw: String): Quote? = parseOkxTickerWsMessage(raw)?.toQuote()
 
     override suspend fun search(): List<Instrument> = withContext(Dispatchers.IO) {
         val spotArr = json("https://www.okx.com/api/v5/public/instruments?instType=SPOT")
@@ -171,5 +163,85 @@ internal class OkxProvider(
             )
         }
         return out
+    }
+}
+
+// ------------------------------------------------------------ 多标的公共行情辅助
+
+/** OKX tickers 频道/REST 的单行数据；24h 字段可能缺失，此时只更新价格 */
+data class OkxTickerRow(
+    val instId: String,
+    val last: Double,
+    val open24h: Double? = null,
+    val high24h: Double? = null,
+    val low24h: Double? = null,
+    val vol24h: Double? = null,
+    val quoteVol24h: Double? = null,
+    val tsMs: Long? = null,
+    /** 原始价格字符串，用于推断显示小数位 */
+    val lastRaw: String? = null
+) {
+    val changePct: Double?
+        get() = open24h?.takeIf { it > 0.0 }?.let { (last - it) / it * 100.0 }
+
+    fun toQuote(): Quote = Quote(last, open24h, high24h, low24h, vol24h, quoteVol24h)
+}
+
+fun parseOkxTicker(o: JSONObject): OkxTickerRow? {
+    val instId = o.optString("instId").trim()
+    if (instId.isEmpty()) return null
+    val last = o.num("last") ?: return null
+    return OkxTickerRow(
+        instId = instId,
+        last = last,
+        open24h = o.num("open24h"),
+        high24h = o.num("high24h"),
+        low24h = o.num("low24h"),
+        vol24h = o.num("vol24h"),
+        quoteVol24h = o.num("volCcy24h"),
+        tsMs = o.num("ts")?.toLong(),
+        lastRaw = o.optString("last").takeIf { it.isNotBlank() }
+    )
+}
+
+fun parseOkxTickerArray(arr: JSONArray?): List<OkxTickerRow> {
+    if (arr == null) return emptyList()
+    val out = ArrayList<OkxTickerRow>(arr.length())
+    for (i in 0 until arr.length()) {
+        arr.optJSONObject(i)?.let { parseOkxTicker(it)?.let(out::add) }
+    }
+    return out
+}
+
+/** 解析 GET /api/v5/market/tickers 的完整响应 */
+fun parseOkxTickers(raw: String): List<OkxTickerRow> {
+    val root = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
+    return parseOkxTickerArray(root.optJSONArray("data"))
+}
+
+/** 解析 WS tickers 推送；订阅确认等 event 消息返回 null */
+fun parseOkxTickerWsMessage(raw: String): OkxTickerRow? {
+    val o = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+    if (o.optString("event").isNotEmpty()) return null
+    val d = o.optJSONArray("data") ?: return null
+    if (d.length() == 0) return null
+    return d.optJSONObject(0)?.let { parseOkxTicker(it) }
+}
+
+/** 一条 subscribe/unsubscribe 消息可带 N 个 instId；QuoteHub 复用同一连接做增量变更 */
+object OkxFeed {
+    const val WS_URL = "wss://ws.okx.com:443/ws/v5/public"
+    const val REST_BASE = "https://www.okx.com"
+
+    fun subscribe(instIds: Collection<String>): String = control("subscribe", instIds)
+
+    fun unsubscribe(instIds: Collection<String>): String = control("unsubscribe", instIds)
+
+    private fun control(op: String, instIds: Collection<String>): String {
+        val args = JSONArray()
+        for (id in instIds) {
+            args.put(JSONObject().put("channel", "tickers").put("instId", id))
+        }
+        return JSONObject().put("op", op).put("args", args).toString()
     }
 }

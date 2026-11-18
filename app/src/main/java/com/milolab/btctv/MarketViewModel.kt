@@ -21,10 +21,28 @@ import com.milolab.btctv.data.StockUniverse
 import com.milolab.btctv.data.TF
 import com.milolab.btctv.data.UiState
 import com.milolab.btctv.data.applyTick
+import com.milolab.btctv.data.hub.CandleStore
+import com.milolab.btctv.data.hub.MoversRepository
+import com.milolab.btctv.data.hub.QuoteHub
 import com.milolab.btctv.data.indicators.IndicatorEngine
 import com.milolab.btctv.data.indicators.IndicatorRegistry
 import com.milolab.btctv.data.indicators.IndicatorResult
 import com.milolab.btctv.data.mergeWith
+import com.milolab.btctv.data.overview.createOverviewRepository
+import com.milolab.btctv.ui.board.BoardFeed
+import com.milolab.btctv.ui.board.BoardUiState
+import com.milolab.btctv.ui.board.defaultInstrumentLookup
+import com.milolab.btctv.ui.board.layout.LayoutEdit
+import com.milolab.btctv.ui.board.layout.LayoutPresets
+import com.milolab.btctv.ui.board.layout.LayoutSpec
+import com.milolab.btctv.ui.board.layout.LayoutValidator
+import com.milolab.btctv.ui.board.layout.ModuleType
+import com.milolab.btctv.ui.board.layout.SlotBinding
+import com.milolab.btctv.ui.board.layout.SplitDirection
+import com.milolab.btctv.ui.board.layout.SplitRatio
+import com.milolab.btctv.ui.board.layout.leafSlotIds
+import com.milolab.btctv.ui.board.mainChartDataFromUi
+import com.milolab.btctv.ui.board.moduleSupportsTimeframe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,7 +51,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -75,6 +96,21 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
     )
     val ui = _ui.asStateFlow()
 
+    // ---- 看板（非经典布局） ----
+    private val _board = MutableStateFlow(
+        BoardUiState(
+            spec = prefs.layout,
+            customSpec = prefs.customLayout,
+            focusedSlotId = prefs.layout.root.leafSlotIds().firstOrNull()
+        )
+    )
+    val board: StateFlow<BoardUiState> = _board.asStateFlow()
+
+    private class BoardServices(val hub: QuoteHub, val feed: BoardFeed)
+
+    private var boardServices: BoardServices? = null
+    private var boardHintJob: Job? = null
+
     private val live = AtomicReference<Quote?>(null)
     private val liveSeq = AtomicLong(0L)
     private val lastLiveAt = AtomicLong(0L)
@@ -98,6 +134,26 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
     init {
         startIndicatorWorker()
         startSession()
+        if (!_board.value.spec.legacy) startBoardFeed()
+        // 主标的/周期变化时重设看板订阅。每 120ms 的行情推送不会触发这里。
+        viewModelScope.launch {
+            _ui.map { it.instrument.id to it.tf }
+                .distinctUntilChanged()
+                .collect {
+                    boardServices?.feed?.update(
+                        _board.value.spec,
+                        _ui.value.instrument,
+                        _ui.value.tf
+                    )
+                }
+        }
+    }
+
+    override fun onCleared() {
+        boardServices?.feed?.stop()
+        boardServices?.hub?.close()
+        boardServices = null
+        super.onCleared()
     }
 
     // ------------------------------------------------------------ 会话控制
@@ -229,7 +285,7 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
                         tickCount = if (changed) st.tickCount + 1 else st.tickCount
                     )
                 }
-                val nextCandles = st.candles.applyTick(merged.price, st.tf.seconds, now)
+                val nextCandles = st.candles.applyTick(merged.price, st.tf, now)
                 val lastChanged = nextCandles.size != st.candles.size ||
                     nextCandles.last() != st.candles.last()
                 candlesChanged = lastChanged
@@ -526,6 +582,9 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
                 searching = false
             )
         }
+        if (_board.value.searchTargetSlotId != null) {
+            _board.update { it.copy(searchTargetSlotId = null) }
+        }
     }
 
     fun setFilter(filter: MarketFilter) = _ui.update { it.copy(searchFilter = filter) }
@@ -563,6 +622,242 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
         }
         prefs.favorites = next
         _ui.update { it.copy(favorites = next) }
+    }
+
+    // ------------------------------------------------------------ 看板
+
+    fun boardApplyPreset(id: String) {
+        val spec = LayoutPresets.byId(id) ?: return
+        applyLayout(spec)
+    }
+
+    /** 应用任意已保存的布局（如已存的自定义布局）。 */
+    fun boardApplySpec(spec: LayoutSpec) = applyLayout(spec)
+
+    fun boardRestoreClassic() {
+        applyLayout(LayoutPresets.classic())
+        showBoardHint("已恢复经典布局")
+    }
+
+    /** 进入自定义编辑：把当前布局复制成 custom 缓冲，之后的编辑都写进它。 */
+    fun boardStartCustom() {
+        val cur = _board.value.spec
+        val buffer = if (cur.id == CUSTOM_LAYOUT_ID) cur
+        else cur.copy(id = CUSTOM_LAYOUT_ID, name = "自定义布局")
+        applyEdited(buffer)
+        showBoardHint("自定义布局：选中一格后编辑")
+    }
+
+    fun boardSaveCustom() {
+        val spec = _board.value.spec
+        val custom = if (spec.id == CUSTOM_LAYOUT_ID) spec else _board.value.customSpec ?: return
+        prefs.customLayout = custom
+        showBoardHint("自定义布局已保存")
+    }
+
+    fun boardClearCustom() {
+        prefs.customLayout = null
+        _board.update { it.copy(customSpec = null) }
+        if (_board.value.spec.id == CUSTOM_LAYOUT_ID) applyLayout(LayoutPresets.classic())
+        showBoardHint("已清除自定义布局")
+    }
+
+    fun boardFocusSlot(slotId: String) = _board.update {
+        if (it.focusedSlotId == slotId && it.fullscreenSlotId == null) it
+        else it.copy(focusedSlotId = slotId)
+    }
+
+    /** null = 退出全屏 */
+    fun boardEnterFullscreen(slotId: String?) = _board.update {
+        if (slotId == null) {
+            it.copy(fullscreenSlotId = null)
+        } else {
+            it.copy(fullscreenSlotId = slotId, focusedSlotId = slotId)
+        }
+    }
+
+    fun boardExitFullscreen() = _board.update { it.copy(fullscreenSlotId = null) }
+
+    fun boardOpenSlotSearch(slotId: String) {
+        _board.update { it.copy(searchTargetSlotId = slotId, focusedSlotId = slotId) }
+        openSearch()
+    }
+
+    /** 搜索选中：看板槽位模式下写入 Fixed 绑定，否则切全局主标的。 */
+    fun selectInstrument(inst: Instrument) {
+        val target = _board.value.searchTargetSlotId
+        if (target != null) {
+            assignSlotInstrument(target, inst)
+            closeSearch()
+        } else {
+            setInstrument(inst)
+        }
+    }
+
+    fun assignSlotInstrument(slotId: String, inst: Instrument) {
+        val ok = editCurrent("该格无法改标的") {
+            LayoutEdit.setBinding(it, slotId, SlotBinding.Fixed(inst.id))
+        }
+        if (ok) showBoardHint("已将 ${inst.baseCurrency} 绑定到该格")
+    }
+
+    fun boardSetSlotBinding(slotId: String, binding: SlotBinding) {
+        editCurrent { LayoutEdit.setBinding(it, slotId, binding) }
+    }
+
+    fun boardSetSlotTimeframe(slotId: String, tf: TF?) {
+        val slot = _board.value.spec.slots[slotId]
+        if (tf != null && (slot == null || !moduleSupportsTimeframe(slot.module))) {
+            showBoardHint("该格没有周期")
+            return
+        }
+        editCurrent { LayoutEdit.setTimeframe(it, slotId, tf) }
+    }
+
+    fun boardSetSlotModule(slotId: String, module: ModuleType) {
+        editCurrent { spec ->
+            val next = LayoutEdit.setModule(spec, slotId, module) ?: return@editCurrent null
+            if (!moduleSupportsTimeframe(module)) {
+                LayoutEdit.setTimeframe(next, slotId, null) ?: next
+            } else {
+                next
+            }
+        }
+    }
+
+    fun boardSetSlotParam(slotId: String, key: String, value: String) {
+        editCurrent { spec ->
+            val slot = spec.slots[slotId] ?: return@editCurrent null
+            LayoutEdit.setParams(spec, slotId, slot.params + (key to value))
+        }
+    }
+
+    fun boardSplitSlot(slotId: String, direction: SplitDirection, ratio: SplitRatio) {
+        editCurrent("最多 9 格，或该格不能再拆") {
+            LayoutEdit.splitLeaf(it, slotId, direction, ratio)
+        }
+    }
+
+    fun boardMergeSlot(slotId: String) {
+        editCurrent("只有与兄弟二分的格子可以合并") {
+            LayoutEdit.mergeSiblings(it, slotId)
+        }
+    }
+
+    fun boardDeleteSlot(slotId: String) {
+        editCurrent("至少保留一格") {
+            LayoutEdit.removeLeaf(it, slotId)
+        }
+    }
+
+    fun dismissBoardHint() {
+        boardHintJob?.cancel()
+        _board.update { it.copy(hint = null) }
+    }
+
+    private fun applyLayout(spec: LayoutSpec) {
+        if (!LayoutValidator.isValid(spec)) {
+            showBoardHint("布局无效，已忽略")
+            return
+        }
+        prefs.layout = spec
+        _board.update { st ->
+            val focus = st.focusedSlotId?.takeIf { id -> spec.slots.containsKey(id) }
+                ?: spec.root.leafSlotIds().firstOrNull()
+            st.copy(spec = spec, focusedSlotId = focus, fullscreenSlotId = null)
+        }
+        syncBoardFeed()
+    }
+
+    private fun applyEdited(next: LayoutSpec) {
+        if (!LayoutValidator.isValid(next)) {
+            showBoardHint("布局无效，操作已取消")
+            return
+        }
+        prefs.layout = next
+        prefs.customLayout = next
+        _board.update { st ->
+            val focus = st.focusedSlotId?.takeIf { id -> next.slots.containsKey(id) }
+                ?: next.root.leafSlotIds().firstOrNull()
+            st.copy(
+                spec = next,
+                customSpec = next,
+                focusedSlotId = focus,
+                fullscreenSlotId = null
+            )
+        }
+        syncBoardFeed()
+    }
+
+    private fun syncBoardFeed() {
+        val spec = _board.value.spec
+        if (spec.legacy) {
+            stopBoardFeed()
+        } else {
+            startBoardFeed()
+            boardServices?.feed?.update(spec, _ui.value.instrument, _ui.value.tf)
+        }
+    }
+
+    private fun customBase(): LayoutSpec {
+        val cur = _board.value.spec
+        return if (cur.id == CUSTOM_LAYOUT_ID) cur
+        else cur.copy(id = CUSTOM_LAYOUT_ID, name = "自定义布局")
+    }
+
+    /** 编辑当前布局并另存为 custom；失败时给出可读提示并返回 false。 */
+    private fun editCurrent(
+        failure: String = "该操作不合法",
+        block: (LayoutSpec) -> LayoutSpec?
+    ): Boolean {
+        val next = block(customBase())
+        if (next == null) {
+            showBoardHint(failure)
+            return false
+        }
+        applyEdited(next)
+        return true
+    }
+
+    fun showBoardHint(text: String) {
+        boardHintJob?.cancel()
+        _board.update { it.copy(hint = text) }
+        boardHintJob = viewModelScope.launch {
+            delay(2600)
+            _board.update { if (it.hint == text) it.copy(hint = null) else it }
+        }
+    }
+
+    private fun startBoardFeed() {
+        if (boardServices != null) return
+        val hub = QuoteHub(client, viewModelScope)
+        val feed = BoardFeed(
+            parentScope = viewModelScope,
+            hub = hub,
+            candles = CandleStore(client),
+            movers = MoversRepository(client),
+            overview = createOverviewRepository(getApplication()),
+            instrumentLookup = {
+                defaultInstrumentLookup(catalogItems, _ui.value.favorites, _ui.value.recent)
+            },
+            favorites = { _ui.value.favorites },
+            hot = { _ui.value.hot },
+            mainChart = { mainChartDataFromUi(_ui.value) }
+        )
+        boardServices = BoardServices(hub, feed)
+        viewModelScope.launch {
+            feed.contents.collect { contents ->
+                _board.update { if (it.contents === contents) it else it.copy(contents = contents) }
+            }
+        }
+        feed.update(_board.value.spec, _ui.value.instrument, _ui.value.tf)
+    }
+
+    private fun stopBoardFeed() {
+        boardServices?.feed?.stop()
+        boardServices?.hub?.close()
+        boardServices = null
+        _board.update { if (it.contents.isEmpty()) it else it.copy(contents = emptyMap()) }
     }
 
     // ------------------------------------------------------------ 搜索目录
@@ -667,5 +962,6 @@ class MarketViewModel(app: Application) : AndroidViewModel(app) {
         const val RECENT_MAX = 12
         const val FAVORITE_MAX = 30
         const val SEARCH_DEBOUNCE_MS = 120L
+        const val CUSTOM_LAYOUT_ID = "custom"
     }
 }
